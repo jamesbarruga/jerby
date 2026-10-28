@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "jerby-dash",
+      "title": "Jerby Dash",
+      "description": "Race your friend by alternating A and B.",
+      "license": "MIT",
+      "cover": "jerby-dash-cover.png",
+      "url": "https://github.com/jamesbarruga/jerby/releases/download/v0.3.0-alpha/jerby-dash.zip",
+      "archiveSha256": "a68a53f3428d4765bbbeddda200c7f460b6d55071c1f5a6bdfb4c1d129cbae50",
+      "romSha256": "027da24c60e00afd3bab4b9efdcb74296224be86cc9cce46049a8fceec1eeaa5",
+      "romName": "jerby_dash.sfc"
+    },
+    {
+      "id": "jerby-tag",
+      "title": "Jerby Tag",
+      "description": "Chase your friend and press A to tag.",
+      "license": "MIT",
+      "cover": "jerby-tag-cover.png",
+      "url": "https://github.com/jamesbarruga/jerby/releases/download/v0.3.0-alpha/jerby-tag.zip",
+      "archiveSha256": "1a983ef3465e29b322c6f918075c5079466df302fba2d48e8b91502705b483fa",
+      "romSha256": "87d485684ce0280126c0d6af42f8ab61ae9b785b9a9659d0ca2a26845f86325f",
+      "romName": "jerby_tag.sfc"
+    },
+    {
+      "id": "jerby-catch",
+      "title": "Jerby Catch",
+      "description": "Move left and right to catch falling stars together.",
+      "license": "MIT",
+      "cover": "jerby-catch-cover.png",
+      "url": "https://github.com/jamesbarruga/jerby/releases/download/v0.3.0-alpha/jerby-catch.zip",
+      "archiveSha256": "59d95df28af38c5fd07ab358c504ee51ad892903cce195b879e3879462e0cc1c",
+      "romSha256": "7d4742c060b24b9471925c91eb920c281b1ba901630425bb0da08c47148bcd36",
+      "romName": "jerby_catch.sfc"
+    },
+    {
+      "id": "jerby-pong",
+      "title": "Jerby Pong",
+      "description": "Defend your side and bounce the ball past your friend.",
+      "license": "MIT",
+      "cover": "jerby-pong-cover.png",
+      "url": "https://github.com/jamesbarruga/jerby/releases/download/v0.3.0-alpha/jerby-pong.zip",
+      "archiveSha256": "4752586a21b5170b2d0b0facd9017dad39c9f34b5577218f85f698c6ce24908d",
+      "romSha256": "5ff18dc564350766afc85ec1b38ccad3596643d2eb97ad3dc2f20755970e3b77",
+      "romName": "jerby_pong.sfc"
+    }
+  ]
+}

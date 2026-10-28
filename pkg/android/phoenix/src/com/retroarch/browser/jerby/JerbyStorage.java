@@ -10,6 +10,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
 
 final class JerbyStorage {
     static final long MAX_ROM_BYTES = 64L * 1024L * 1024L;
@@ -120,7 +122,6 @@ final class JerbyStorage {
     }
 
     static File importRom(Context context, InputStream in, String name) throws IOException {
-        name = safeName(name);
         File temp = new File(romDir(context), ".import-" + System.nanoTime());
         try {
             long total = 0;
@@ -134,13 +135,65 @@ final class JerbyStorage {
                 }
             }
             if (total == 0) throw new IOException("Game file is empty");
-            String hash = sha256(temp);
-            File destination = new File(romDir(context), hash.substring(0, 8) + "-" + name);
-            if (destination.exists()) return destination;
-            if (!temp.renameTo(destination)) throw new IOException("Cannot save game");
-            return destination;
+            if (isZip(temp)) {
+                List<JerbyArchive.Rom> extracted = JerbyArchive.extract(temp, romDir(context), MAX_ROM_BYTES);
+                try {
+                    File first = null;
+                    for (JerbyArchive.Rom rom : extracted) {
+                        File saved = saveRom(context, rom.file, rom.name, null);
+                        if (first == null) first = saved;
+                    }
+                    return first;
+                } finally { for (JerbyArchive.Rom rom : extracted) rom.file.delete(); }
+            }
+            if (name != null && name.toLowerCase(Locale.US).endsWith(".zip"))
+                throw new IOException("Download is not a valid ZIP");
+            return saveRom(context, temp, safeName(name), null);
         } finally {
             if (temp.exists()) temp.delete();
+        }
+    }
+
+    static File importVerified(Context context, File download, String name, String expectedRomHash)
+            throws IOException {
+        if (expectedRomHash == null || !expectedRomHash.matches("[0-9a-fA-F]{64}"))
+            throw new IOException("Invalid catalog checksum");
+        if (!isZip(download)) return saveRom(context, download, safeName(name), expectedRomHash);
+        List<JerbyArchive.Rom> extracted = JerbyArchive.extract(download, romDir(context), MAX_ROM_BYTES);
+        try {
+            for (JerbyArchive.Rom rom : extracted)
+                if (sha256(rom.file).equalsIgnoreCase(expectedRomHash))
+                    return saveRom(context, rom.file, rom.name, expectedRomHash);
+            throw new IOException("Downloaded game checksum did not match the catalog");
+        } finally { for (JerbyArchive.Rom rom : extracted) rom.file.delete(); }
+    }
+
+    private static File saveRom(Context context, File source, String name, String expectedHash)
+            throws IOException {
+        name = safeName(name);
+        if (name.toLowerCase(Locale.US).endsWith(".zip")) throw new IOException("ZIP must contain a SNES game");
+        String hash = sha256(source);
+        if (expectedHash != null && !hash.equalsIgnoreCase(expectedHash))
+            throw new IOException("Downloaded game checksum did not match the catalog");
+        File destination = new File(romDir(context), hash.substring(0, 8) + "-" + name);
+        if (destination.exists()) {
+            if (sha256(destination).equalsIgnoreCase(hash)) return destination;
+            throw new IOException("A different game already has this name");
+        }
+        if (!source.renameTo(destination)) throw new IOException("Cannot save game");
+        return destination;
+    }
+
+    private static boolean isZip(File file) throws IOException {
+        try (FileInputStream in = new FileInputStream(file)) {
+            byte[] magic = new byte[4];
+            int count = 0;
+            while (count < magic.length) {
+                int read = in.read(magic, count, magic.length - count);
+                if (read < 0) return false;
+                count += read;
+            }
+            return magic[0] == 'P' && magic[1] == 'K' && magic[2] == 3 && magic[3] == 4;
         }
     }
 }

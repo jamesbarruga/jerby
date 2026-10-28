@@ -1,8 +1,8 @@
 <!-- <!DOCTYPE manifest [ <!ENTITY % versionDTD SYSTEM "../../../version.dtd"> %versionDTD; ]> !-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools"
-    android:versionCode="2"
-    android:versionName="0.2.0-alpha"
+    android:versionCode="3"
+    android:versionName="0.3.0-alpha"
     android:installLocation="internalOnly">
     <uses-feature android:glEsVersion="0x00020000" />
     <uses-feature android:name="android.hardware.type.pc" android:required="false"/>
@@ -45,6 +45,10 @@
         </activity>
         <activity android:name="com.retroarch.browser.jerby.JerbyControlsActivity" android:exported="false" android:screenOrientation="landscape" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
         <service android:name="com.retroarch.browser.jerby.JerbyTransferService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name="com.retroarch.browser.jerby.JerbyApkShareService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <provider android:name="com.retroarch.browser.jerby.JerbyApkProvider"
+            android:authorities="${applicationId}.apk" android:exported="false"
+            android:grantUriPermissions="true" />
         <activity-alias android:name="com.retroarch.browser.mainmenu.MainMenuActivity"
             android:targetActivity="com.retroarch.browser.retroactivity.RetroActivityFuture"
             android:exported="true">

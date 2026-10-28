@@ -4,7 +4,7 @@ Jerby! is a free Android SNES app for two phones on the same Wi-Fi. It is a
 modified build of [RetroArch](https://github.com/libretro/RetroArch) with a
 landscape game catalog, automatic LAN discovery and game transfer, a bundled
 [bsnes-mercury Performance](https://github.com/libretro/bsnes-mercury) core,
-and two original games: Jerby Dash and Jerby Tag.
+and four original games: Jerby Dash, Jerby Tag, Jerby Catch, and Jerby Pong.
 
 ## Play
 
@@ -17,6 +17,23 @@ and two original games: Jerby Dash and Jerby Tag.
    checks its SHA-256 before playing. The host is Player 1 and the joining
    phone is Player 2.
 
+## Discover and share
+
+**My Games** shows installed games. **Discover** shows a curated catalog of
+freely redistributable SNES games. Dash and Tag are already installed; Catch
+and Pong have **Download & Play** buttons. Downloads are checked against both
+the ZIP and ROM SHA-256 values in `jerby/store/catalog.json`. Jerby! extracts
+SNES ROMs from ZIPs automatically. The catalog is read from this repository's
+`main` branch, with an included offline copy as fallback. Additional catalog
+games require a redistributable ROM, creator permission, and checksum entries.
+
+**Share Jerby!** offers a QR code and local web page that serves the APK from
+the installed phone. The other phone can use the same Wi-Fi or connect to the
+first phone's hotspot; internet access is not needed. Android's share sheet
+can also send the APK directly using nearby or Bluetooth sharing where
+available. Android may ask the receiving phone to allow installation from its
+browser or file receiver.
+
 The catalog has a mute toggle and **Controls**. The control editor lets you drag
 the D-pad, face buttons, shoulder buttons, Start, and Select to comfortable
 positions. Changes are used when the next game starts. The game view stays in
@@ -24,8 +41,8 @@ landscape and shows the game and touch controls. Android Back returns to the
 catalog.
 
 You can add SNES ROMs through the catalog's **Add game** button. The download
-accepts a direct HTTPS link to an `.sfc`, `.smc`, `.fig`,
-`.swc`, or `.zip` file. Use files you have the right to use.
+accepts a direct HTTPS link to an `.sfc`, `.smc`, `.fig`, `.swc`, or `.zip`
+file, and ZIPs are extracted automatically. Use files you have the right to use.
 
 ## Source and licenses
 
@@ -33,6 +50,7 @@ The Android emulator and netplay code derives from RetroArch, licensed GPLv3.
 The SNES core is bsnes-mercury Performance, licensed GPLv3. The two included
 games are original Jerby! games under MIT. Their SNES toolkit and sprite asset
 come from OpenSNES under MIT; the notice is in `OPENSNES_LICENSE.txt`.
+QR generation uses ZXing Core under Apache 2.0.
 
 Jerby-specific Android code is in
 `pkg/android/phoenix/src/com/retroarch/browser/jerby/`. The small native
@@ -62,6 +80,6 @@ The games' source is in `jerby/games/`. Build them with
 `aa8b441504172078ba136a94c20a41dd1c156b4c` and copy their `.sfc`
 outputs to `pkg/android/phoenix/assets/`.
 
-The previous manual LAN flow was played successfully on two real phones. This
-new automatic discovery and control editor have been compiled locally but still
-need a real-device test before a stable release.
+The previous manual LAN flow was played successfully on two real phones. The
+new automatic discovery, game catalog, and app sharing have been compiled
+locally but still need real-device testing before a stable release.

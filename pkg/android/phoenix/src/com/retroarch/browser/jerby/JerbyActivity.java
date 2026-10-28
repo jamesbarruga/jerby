@@ -2,9 +2,12 @@ package com.retroarch.browser.jerby;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.BitmapFactory;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -22,21 +25,31 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import com.retroarch.browser.retroactivity.RetroActivityFuture;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Enumeration;
 import java.util.UUID;
 
 /** A landscape game shelf: one tap plays, and a second open phone joins itself. */
@@ -49,7 +62,16 @@ public final class JerbyActivity extends Activity {
     private TextView status;
     private Button viewButton;
     private Button muteButton;
+    private Button myGamesTab;
+    private Button discoverButton;
+    private TextView heading;
     private boolean gridView;
+    private boolean discoverTab;
+    private boolean storeLoading;
+    private boolean downloading;
+    private boolean sharing;
+    private final List<JerbyStore.Game> storeGames = new ArrayList<>();
+    private final List<File> storeInstalled = new ArrayList<>();
     private boolean hosting;
     private boolean launchedGame;
     private volatile boolean listening;
@@ -91,6 +113,11 @@ public final class JerbyActivity extends Activity {
     @Override protected void onPause() {
         stopDiscovery();
         super.onPause();
+    }
+
+    @Override protected void onDestroy() {
+        if (sharing) stopService(new Intent(this, JerbyApkShareService.class));
+        super.onDestroy();
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
@@ -162,7 +189,17 @@ public final class JerbyActivity extends Activity {
         header.addView(action("Controls", () -> startActivity(new Intent(this, JerbyControlsActivity.class))), buttonLayout(compact ? 90 : 105));
         header.addView(action("+  Add game", this::addGame), buttonLayout(compact ? 98 : 116));
 
-        TextView heading = text("Pick a game", 25, Color.WHITE);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        page.addView(tabs, new LinearLayout.LayoutParams(-1, dp(48)));
+        myGamesTab = action("My Games", () -> showTab(false));
+        discoverButton = action("Discover", () -> showTab(true));
+        tabs.addView(myGamesTab, buttonLayout(126));
+        tabs.addView(discoverButton, buttonLayout(126));
+        tabs.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        tabs.addView(action("Share Jerby!", this::shareApp), buttonLayout(142));
+
+        heading = text("Pick a game", 25, Color.WHITE);
         heading.setTypeface(null, android.graphics.Typeface.BOLD);
         page.addView(heading);
         status = text("Tap to play. Another open phone on this Wi-Fi joins automatically.", 14,
@@ -172,6 +209,7 @@ public final class JerbyActivity extends Activity {
         gamesView = new LinearLayout(this);
         gamesView.setOrientation(LinearLayout.VERTICAL);
         page.addView(gamesView);
+        styleTabs();
     }
 
     private LinearLayout.LayoutParams buttonLayout(int width) {
@@ -186,11 +224,30 @@ public final class JerbyActivity extends Activity {
                 .replace('_', ' ').replace('-', ' ').trim();
         if (name.equalsIgnoreCase("jerby dash")) return "Jerby Dash";
         if (name.equalsIgnoreCase("jerby tag")) return "Jerby Tag";
+        if (name.equalsIgnoreCase("jerby catch")) return "Jerby Catch";
+        if (name.equalsIgnoreCase("jerby pong")) return "Jerby Pong";
         return name;
+    }
+
+    private void styleTabs() {
+        myGamesTab.setBackground(panel(discoverTab ? PANEL : Color.rgb(21, 124, 133), 18, 0));
+        discoverButton.setBackground(panel(discoverTab ? Color.rgb(21, 124, 133) : PANEL, 18, 0));
+    }
+
+    private void showTab(boolean discover) {
+        discoverTab = discover;
+        heading.setText(discover ? "Discover games" : "Pick a game");
+        styleTabs();
+        if (discover) {
+            say("Free games you can download and play in one tap.");
+            if (storeGames.isEmpty()) loadStore();
+        } else say("Tap to play. Another open phone on this Wi-Fi joins automatically.");
+        refreshGames();
     }
 
     private void refreshGames() {
         gamesView.removeAllViews();
+        if (discoverTab) { renderStore(); return; }
         File[] games = JerbyStorage.games(this);
         if (games.length == 0) { gamesView.addView(text("Add a SNES game to begin.", 18, Color.WHITE)); return; }
         if (!gridView) {
@@ -224,8 +281,11 @@ public final class JerbyActivity extends Activity {
         cardParams.setMargins(dp(4), dp(4), dp(4), dp(6));
         card.setLayoutParams(cardParams);
 
-        String asset = game.getName().equals("jerby_dash.sfc") ? "jerby-dash-cover.png"
-                : game.getName().equals("jerby_tag.sfc") ? "jerby-tag-cover.png" : null;
+        String filename = game.getName().replaceFirst("^[0-9a-f]{8}-", "");
+        String asset = filename.equals("jerby_dash.sfc") ? "jerby-dash-cover.png"
+                : filename.equals("jerby_tag.sfc") ? "jerby-tag-cover.png"
+                : filename.equals("jerby_catch.sfc") ? "jerby-catch-cover.png"
+                : filename.equals("jerby_pong.sfc") ? "jerby-pong-cover.png" : null;
         if (asset != null) {
             ImageView cover = new ImageView(this);
             try (InputStream in = getAssets().open(asset)) { cover.setImageBitmap(BitmapFactory.decodeStream(in)); }
@@ -257,6 +317,206 @@ public final class JerbyActivity extends Activity {
         return card;
     }
 
+    private void loadStore() {
+        if (storeLoading) return;
+        storeLoading = true;
+        say("Opening Discover…");
+        new Thread(() -> {
+            try {
+                publishStore(JerbyStore.loadBundled(this));
+                try { publishStore(JerbyStore.loadRemote()); }
+                catch (Exception offline) { /* Bundled catalog remains available. */ }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    storeLoading = false;
+                    if (discoverTab) say("Discover is unavailable: " + e.getMessage());
+                });
+            }
+        }, "Jerby store catalog").start();
+    }
+
+    private void publishStore(List<JerbyStore.Game> found) throws IOException {
+        List<File> installed = new ArrayList<>();
+        for (JerbyStore.Game game : found) installed.add(JerbyStore.installed(this, game));
+        runOnUiThread(() -> {
+            if (downloading) return;
+            storeLoading = false;
+            storeGames.clear(); storeGames.addAll(found);
+            storeInstalled.clear(); storeInstalled.addAll(installed);
+            if (discoverTab) { say("Tap a game to download and play."); refreshGames(); }
+        });
+    }
+
+    private void renderStore() {
+        if (storeGames.isEmpty()) {
+            gamesView.addView(text(storeLoading ? "Loading games…" : "No games available yet.", 18, Color.WHITE));
+            return;
+        }
+        if (!gridView) {
+            for (int index = 0; index < storeGames.size(); index++)
+                gamesView.addView(storeCard(index, false));
+            return;
+        }
+        int columns = getResources().getConfiguration().screenWidthDp >= 700 ? 3 : 2;
+        for (int first = 0; first < storeGames.size(); first += columns) {
+            LinearLayout row = new LinearLayout(this);
+            gamesView.addView(row);
+            for (int column = 0; column < columns; column++) {
+                int index = first + column;
+                if (index < storeGames.size()) {
+                    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(225), 1);
+                    params.setMargins(dp(4), dp(4), dp(4), dp(6));
+                    row.addView(storeCard(index, true), params);
+                } else row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+            }
+        }
+    }
+
+    private View storeCard(int index, boolean grid) {
+        JerbyStore.Game game = storeGames.get(index);
+        File installed = storeInstalled.get(index);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(grid ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        card.setBackground(panel(PANEL, 18, Color.rgb(54, 110, 128)));
+        card.setOnClickListener(v -> { if (installed != null) play(installed); else downloadStore(index); });
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, grid ? dp(215) : dp(112));
+        cardParams.setMargins(dp(4), dp(4), dp(4), dp(6));
+        card.setLayoutParams(cardParams);
+
+        ImageView cover = new ImageView(this);
+        try (InputStream in = getAssets().open(game.cover)) {
+            cover.setImageBitmap(BitmapFactory.decodeStream(in));
+        } catch (IOException ignored) { }
+        cover.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        cover.setBackground(panel(Color.rgb(9, 31, 51), 10, 0));
+        card.addView(cover, new LinearLayout.LayoutParams(grid ? -1 : dp(130), grid ? dp(126) : dp(90)));
+
+        LinearLayout description = new LinearLayout(this);
+        description.setOrientation(LinearLayout.VERTICAL);
+        description.setGravity(Gravity.CENTER_VERTICAL);
+        description.setPadding(grid ? 0 : dp(12), 0, 0, 0);
+        TextView title = text(game.title, 18, Color.WHITE);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        description.addView(title);
+        TextView subtitle = text(game.description, 12, Color.rgb(182, 216, 222));
+        subtitle.setMaxLines(grid ? 2 : 1);
+        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        description.addView(subtitle);
+        description.addView(text(installed == null ? "↓  Download & Play  ·  " + game.license
+                : "✓  Play  ·  Installed", 13, TEAL));
+        card.addView(description, new LinearLayout.LayoutParams(grid ? -1 : 0, grid ? dp(78) : -1, grid ? 0 : 1));
+        return card;
+    }
+
+    private void downloadStore(int index) {
+        if (downloading) { say("A game is already downloading…"); return; }
+        downloading = true;
+        JerbyStore.Game game = storeGames.get(index);
+        say("Downloading " + game.title + "…");
+        new Thread(() -> {
+            try {
+                File installed = JerbyStore.installed(this, game);
+                if (installed == null) installed = JerbyStore.download(this, game,
+                        percent -> runOnUiThread(() -> say("Downloading " + game.title + "… " + percent + "%")));
+                File ready = installed;
+                runOnUiThread(() -> {
+                    downloading = false;
+                    if (index < storeInstalled.size()) storeInstalled.set(index, ready);
+                    refreshGames();
+                    say("Starting " + game.title + "…");
+                    play(ready);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> { downloading = false; say("Download failed: " + e.getMessage()); });
+            }
+        }, "Jerby store download").start();
+    }
+
+    private String localWifiIp() {
+        try {
+            String fallback = null;
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface network = interfaces.nextElement();
+                if (!network.isUp() || network.isLoopback()) continue;
+                Enumeration<InetAddress> addresses = network.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (!(address instanceof Inet4Address) || address.isLoopbackAddress()) continue;
+                    if (network.getName().startsWith("wlan") || network.getName().startsWith("wifi"))
+                        return address.getHostAddress();
+                    if (fallback == null && address.isSiteLocalAddress()) fallback = address.getHostAddress();
+                }
+            }
+            return fallback;
+        } catch (Exception ignored) { return null; }
+    }
+
+    private void shareApp() {
+        String ip = localWifiIp();
+        String link = ip == null ? null : "http://" + ip + ":" + JerbyApkShareService.PORT + "/";
+        if (link != null) {
+            Intent service = new Intent(this, JerbyApkShareService.class);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
+            sharing = true;
+        }
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER_HORIZONTAL);
+        content.setPadding(dp(18), dp(4), dp(18), dp(8));
+        TextView instructions = text(link == null
+                ? "Send the APK directly with Android's nearby or Bluetooth sharing. No internet needed."
+                : "Scan on the new phone. Use the same Wi-Fi or connect it to this phone's hotspot. No internet needed.", 15, DARK);
+        content.addView(instructions);
+        if (link != null) {
+            try {
+                BitMatrix matrix = new QRCodeWriter().encode(link, BarcodeFormat.QR_CODE, 420, 420);
+                Bitmap bitmap = Bitmap.createBitmap(matrix.getWidth(), matrix.getHeight(), Bitmap.Config.ARGB_8888);
+                for (int y = 0; y < matrix.getHeight(); y++)
+                    for (int x = 0; x < matrix.getWidth(); x++)
+                        bitmap.setPixel(x, y, matrix.get(x, y) ? Color.BLACK : Color.WHITE);
+                ImageView qr = new ImageView(this);
+                qr.setImageBitmap(bitmap);
+                content.addView(qr, new LinearLayout.LayoutParams(dp(170), dp(170)));
+            } catch (Exception e) { say("Could not make QR code: " + e.getMessage()); }
+            TextView address = text(link, 16, Color.rgb(12, 93, 117));
+            address.setTextIsSelectable(true);
+            content.addView(address);
+            Button copy = new Button(this);
+            copy.setText("Copy link");
+            copy.setAllCaps(false);
+            copy.setOnClickListener(v -> {
+                ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                clipboard.setPrimaryClip(ClipData.newPlainText("Jerby! download", link));
+                Toast.makeText(this, "Link copied", Toast.LENGTH_SHORT).show();
+            });
+            content.addView(copy);
+        }
+        Button offline = new Button(this);
+        offline.setText("Send APK with Android sharing");
+        offline.setAllCaps(false);
+        offline.setOnClickListener(v -> {
+            Uri apk = Uri.parse("content://" + getPackageName() + ".apk/jerby.apk");
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("application/vnd.android.package-archive");
+            send.putExtra(Intent.EXTRA_STREAM, apk);
+            send.setClipData(ClipData.newRawUri("Jerby! APK", apk));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(send, "Send Jerby! to another phone"));
+        });
+        content.addView(offline);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Share Jerby!")
+                .setView(content).setPositiveButton("Done", null).create();
+        dialog.setOnDismissListener(ignored -> {
+            if (sharing) stopService(new Intent(this, JerbyApkShareService.class));
+            sharing = false;
+        });
+        dialog.show();
+    }
+
     private void say(String message) { if (status != null) status.setText(message); }
 
     private boolean launch(File game, String mode, String hostIp) {
@@ -275,6 +535,18 @@ public final class JerbyActivity extends Activity {
     }
 
     private void play(File game) {
+        if (game.getName().toLowerCase(java.util.Locale.US).endsWith(".zip")) {
+            say("Unpacking game…");
+            new Thread(() -> {
+                try (InputStream in = new FileInputStream(game)) {
+                    File ready = JerbyStorage.importRom(this, in, game.getName());
+                    if (ready == null) throw new IOException("ZIP has no SNES game");
+                    game.delete();
+                    runOnUiThread(() -> { refreshGames(); play(ready); });
+                } catch (Exception e) { runOnUiThread(() -> say("Could not open ZIP: " + e.getMessage())); }
+            }, "Jerby unpack game").start();
+            return;
+        }
         Intent service = new Intent(this, JerbyTransferService.class);
         service.putExtra("game", game.getAbsolutePath());
         String session = UUID.randomUUID().toString();
@@ -395,6 +667,13 @@ public final class JerbyActivity extends Activity {
                 runOnUiThread(() -> say("Copying " + name + " over Wi-Fi…"));
                 game = JerbyStorage.receive(this, in, name, length, hash);
             }
+            if (game.getName().toLowerCase(java.util.Locale.US).endsWith(".zip")) {
+                File archive = game;
+                try (InputStream zipped = new FileInputStream(archive)) {
+                    game = JerbyStorage.importRom(this, zipped, archive.getName());
+                }
+                archive.delete();
+            }
             File ready = game;
             runOnUiThread(() -> {
                 if (!listening) return;
@@ -438,7 +717,7 @@ public final class JerbyActivity extends Activity {
             try (InputStream in = getContentResolver().openInputStream(uri)) {
                 if (in == null) throw new IOException("Cannot open game file");
                 File game = JerbyStorage.importRom(this, in, filename);
-                runOnUiThread(() -> { refreshGames(); say("Added " + title(game)); });
+                runOnUiThread(() -> { showTab(false); say("Added " + title(game)); });
             } catch (Exception e) { runOnUiThread(() -> say("Import failed: " + e.getMessage())); }
         }, "Jerby import").start();
     }
@@ -462,13 +741,24 @@ public final class JerbyActivity extends Activity {
                 URL url = new URL(link);
                 if (!"https".equalsIgnoreCase(url.getProtocol())) throw new IOException("Use a direct HTTPS link");
                 String path = url.getPath();
-                String name = JerbyStorage.safeName(path.substring(path.lastIndexOf('/') + 1));
+                String name = path.substring(path.lastIndexOf('/') + 1);
                 URLConnection connection = url.openConnection();
                 connection.setConnectTimeout(10000);
                 connection.setReadTimeout(30000);
+                try { name = JerbyStorage.safeName(name); }
+                catch (IllegalArgumentException missingExtension) {
+                    String disposition = connection.getHeaderField("Content-Disposition");
+                    if (disposition != null && disposition.contains("filename=")) {
+                        String headerName = disposition.substring(disposition.indexOf("filename=") + 9)
+                                .replace("\"", "").split(";")[0].trim();
+                        try { name = JerbyStorage.safeName(headerName); }
+                        catch (IllegalArgumentException ignored) { name = "download.sfc"; }
+                    } else name = "download.sfc";
+                }
+                String filename = name;
                 try (InputStream in = connection.getInputStream()) {
-                    File game = JerbyStorage.importRom(this, in, name);
-                    runOnUiThread(() -> { refreshGames(); say("Added " + title(game)); });
+                    File game = JerbyStorage.importRom(this, in, filename);
+                    runOnUiThread(() -> { showTab(false); say("Added " + title(game)); });
                 }
             } catch (Exception e) { runOnUiThread(() -> say("Download failed: " + e.getMessage())); }
         }, "Jerby download").start();
