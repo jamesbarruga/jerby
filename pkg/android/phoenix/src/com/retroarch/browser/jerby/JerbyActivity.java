@@ -14,7 +14,6 @@ import android.net.Uri;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
@@ -82,6 +81,7 @@ public final class JerbyActivity extends Activity {
     private int siteRequest;
     private boolean siteLoading;
     private boolean siteMore;
+    private File pendingSiteGame;
     private boolean hosting;
     private boolean launchedGame;
     private volatile boolean listening;
@@ -118,6 +118,18 @@ public final class JerbyActivity extends Activity {
             launchedGame = false;
         }
         startDiscovery();
+    }
+
+    @Override protected void onPostResume() {
+        super.onPostResume();
+        if (pendingSiteGame == null) return;
+        File game = pendingSiteGame;
+        pendingSiteGame = null;
+        getWindow().getDecorView().post(() -> {
+            if (isFinishing()) return;
+            showTab(false);
+            play(game);
+        });
     }
 
     @Override protected void onPause() {
@@ -604,7 +616,7 @@ public final class JerbyActivity extends Activity {
         String link = ip == null ? null : "http://" + ip + ":" + JerbyApkShareService.PORT + "/";
         if (link != null) {
             Intent service = new Intent(this, JerbyApkShareService.class);
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
+            startService(service);
             sharing = true;
         }
 
@@ -697,7 +709,7 @@ public final class JerbyActivity extends Activity {
         String session = UUID.randomUUID().toString();
         service.putExtra("session", session);
         ignoredSession = session;
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
+        startService(service);
         hosting = true;
         launchedGame = true;
         if (!launch(game, "host", null)) {
@@ -854,8 +866,8 @@ public final class JerbyActivity extends Activity {
                     File game = new File(path);
                     String directory = JerbyStorage.romDir(this).getCanonicalPath() + File.separator;
                     if (game.isFile() && game.getCanonicalPath().startsWith(directory)) {
-                        showTab(false);
-                        play(game);
+                        pendingSiteGame = game;
+                        say("Starting " + title(game) + "…");
                     }
                 } catch (IOException error) { say("Could not open game: " + error.getMessage()); }
             }

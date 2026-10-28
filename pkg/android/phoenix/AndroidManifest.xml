@@ -1,8 +1,8 @@
 <!-- <!DOCTYPE manifest [ <!ENTITY % versionDTD SYSTEM "../../../version.dtd"> %versionDTD; ]> !-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools"
-    android:versionCode="4"
-    android:versionName="0.4.0-alpha"
+    android:versionCode="5"
+    android:versionName="0.4.1-alpha"
     android:installLocation="internalOnly">
     <uses-feature android:glEsVersion="0x00020000" />
     <uses-feature android:name="android.hardware.type.pc" android:required="false"/>

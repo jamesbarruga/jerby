@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -14,6 +15,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.view.Gravity;
+import android.view.ViewGroup;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.IOException;
@@ -85,6 +87,12 @@ public final class JerbyRomsGamesDownloadActivity extends Activity {
                         "else if(++n>30){clearInterval(t);}" +
                         "},500)})()", null);
             }
+            @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                removeBrowser(view);
+                browser = null;
+                status.setText("Download page stopped. Tap Cancel, then try the game again.");
+                return true;
+            }
         });
         browser.setDownloadListener(new DownloadListener() {
             @Override public void onDownloadStart(String url, String userAgent,
@@ -110,6 +118,13 @@ public final class JerbyRomsGamesDownloadActivity extends Activity {
         catch (Exception ignored) { return null; }
     }
 
+    private static void removeBrowser(WebView view) {
+        if (view.getParent() instanceof ViewGroup)
+            ((ViewGroup)view.getParent()).removeView(view);
+        view.stopLoading();
+        view.destroy();
+    }
+
     private void importDownload(String address, String userAgent, String cookie, String referer,
             String disposition, String mimeType, long expectedLength) {
         try {
@@ -119,6 +134,8 @@ public final class JerbyRomsGamesDownloadActivity extends Activity {
             String declared = mimeType == null ? "" : mimeType.toLowerCase(Locale.US);
             if (declared.contains("html") || declared.contains("javascript") || declared.contains("android.package"))
                 throw new IOException("Site did not send a SNES game file");
+            if (declared.contains("7z") || declared.contains("rar") || declared.contains("gzip"))
+                throw new IOException("This archive format is not supported. Use a ZIP or SNES ROM.");
             HttpURLConnection connection = (HttpURLConnection)url.openConnection();
             activeConnection = connection;
             connection.setConnectTimeout(12000);
@@ -164,6 +181,9 @@ public final class JerbyRomsGamesDownloadActivity extends Activity {
                             || (start[0] == 'M' && start[1] == 'Z')
                             || (start[0] == 0x7f && start[1] == 'E' && start[2] == 'L' && start[3] == 'F'))
                         throw new IOException("Site did not send a SNES game file");
+                    if (prefix.startsWith("7z") || prefix.startsWith("rar!")
+                            || ((start[0] & 0xff) == 0x1f && (start[1] & 0xff) == 0x8b))
+                        throw new IOException("This archive format is not supported. Use a ZIP or SNES ROM.");
                     File game = JerbyStorage.importRom(this, input, name);
                     if (!canceled) runOnUiThread(() -> {
                         if (canceled) return;
@@ -185,10 +205,8 @@ public final class JerbyRomsGamesDownloadActivity extends Activity {
     @Override protected void onDestroy() {
         canceled = true;
         if (activeConnection != null) activeConnection.disconnect();
-        if (browser != null) {
-            browser.stopLoading();
-            browser.destroy();
-        }
+        if (browser != null) removeBrowser(browser);
+        browser = null;
         super.onDestroy();
     }
 }
