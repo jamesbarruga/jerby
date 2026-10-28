@@ -1,0 +1,134 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef TASKS_FILE_TRANSFER_H
+#define TASKS_FILE_TRANSFER_H
+
+#include <boolean.h>
+#include <retro_common_api.h>
+#include <retro_miscellaneous.h>
+
+#include <queues/task_queue.h>
+
+#include "../msg_hash.h"
+
+RETRO_BEGIN_DECLS
+
+enum nbio_status_enum
+{
+   NBIO_STATUS_INIT = 0,
+   NBIO_STATUS_TRANSFER,
+   NBIO_STATUS_TRANSFER_PARSE,
+   NBIO_STATUS_TRANSFER_FINISHED
+};
+
+enum nbio_type
+{
+   NBIO_TYPE_NONE = 0,
+   NBIO_TYPE_JPEG,
+   NBIO_TYPE_PNG,
+   NBIO_TYPE_TGA,
+   NBIO_TYPE_BMP,
+   NBIO_TYPE_WEBP,
+   NBIO_TYPE_WEBM,
+   NBIO_TYPE_MP4,
+   NBIO_TYPE_OGG,
+   NBIO_TYPE_FLAC,
+   NBIO_TYPE_MP3,
+   NBIO_TYPE_M4A,
+   NBIO_TYPE_AC3,
+   NBIO_TYPE_LPCM,
+   NBIO_TYPE_OPUS,
+   NBIO_TYPE_MOD,
+   NBIO_TYPE_WAV
+};
+
+enum nbio_status_flags
+{
+   NBIO_FLAG_NONE = 0,
+   NBIO_FLAG_IMAGE_SUPPORTS_RGBA,
+   /* Set by task_push_image_load: nbio->data is a
+    * struct nbio_image_handle.  Other nbio users (the audio mixer
+    * tasks) hang different structs off nbio->data, so accessors that
+    * reach through it must check this first. */
+   NBIO_FLAG_IMAGE_TASK
+};
+
+typedef int (*transfer_cb_t)(void *data, size_t len);
+
+struct data_transfer;
+
+/* Historical name: the task-transfer state, once built around an
+ * nbio handle.  Every load now travels a data_transfer prefix spine
+ * (filestream/VFS routing, 64-bit lengths, physical pages only as
+ * far as the read reaches, a hardware guard behind avail).  The nbio_
+ * prefix on this type and its accessors is vestigial: nbio is no
+ * longer part of the RetroArch build at all. */
+typedef struct nbio_handle
+{
+   void *data;
+   char *path;
+   struct data_transfer *xfer;
+   transfer_cb_t  cb;
+
+   unsigned status;
+   uint32_t status_flags;
+
+   enum nbio_type type;
+   bool is_finished;
+} nbio_handle_t;
+
+/* Folders over the transfer for the shared call sites: one contract,
+ * whatever the load path underneath. */
+const uint8_t *nbio_xfer_ptr(nbio_handle_t *nbio, size_t *len);
+/* true while the fill has not yet reached a terminal */
+bool nbio_xfer_progress(nbio_handle_t *nbio, size_t *done, size_t *total);
+/* the read is over and delivered the whole file */
+bool nbio_xfer_complete_ok(nbio_handle_t *nbio);
+void nbio_xfer_close(nbio_handle_t *nbio);
+
+typedef struct
+{
+   void *user_data;
+   enum msg_hash_enums enum_idx;
+   char path[PATH_MAX_LENGTH];
+   /* Where the body was streamed to as it arrived, when the push site
+    * resolved the destination up front; empty when the body is handed
+    * to the callback in memory instead. */
+   char sink_path[PATH_MAX_LENGTH];
+} file_transfer_t;
+
+/**
+ * task_push_http_download_file:
+ *
+ * Download @url straight to @path, streaming the body to disk as it
+ * arrives rather than accumulating it in RAM.  Peak memory is the
+ * receive window, not the payload.
+ *
+ * The completion callback gets status and headers but data == NULL
+ * and len == 0; the body is already on disk.  The partial file is
+ * removed unless the transfer finished cleanly with a 2xx.  The
+ * output directory must already exist.
+ **/
+void *task_push_http_download_file(const char *url, const char *path,
+      bool mute, const char *title,
+      retro_task_callback_t cb, void *user_data);
+
+void* task_push_http_transfer_file(const char* url, bool mute, const char* type,
+      retro_task_callback_t cb, file_transfer_t* transfer_data);
+
+RETRO_END_DECLS
+
+#endif

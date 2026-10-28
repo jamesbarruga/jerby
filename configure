@@ -1,0 +1,22 @@
+#!/bin/sh
+
+# Under zsh, split unquoted expansions as a POSIX sh does.
+if [ -n "${ZSH_VERSION+set}" ] && (emulate sh) >/dev/null 2>&1; then
+	emulate sh
+fi
+
+PACKAGE_NAME=retroarch
+
+. qb/qb.init.sh
+
+. qb/qb.params.sh
+
+. qb/qb.system.sh
+
+. qb/qb.comp.sh
+
+. qb/qb.libs.sh
+
+. qb/qb.moc.sh
+
+. qb/qb.make.sh

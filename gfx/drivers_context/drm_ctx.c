@@ -1,0 +1,1488 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/* KMS/DRM context, running without any window manager.
+ * Based on kmscube example by Rob Clark.
+ */
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <math.h>
+
+#include <sched.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
+
+#include <libdrm/drm.h>
+#include <gbm.h>
+
+#include <lists/dir_list.h>
+#include <lists/string_list.h>
+#include <string/stdstring.h>
+
+#ifdef HAVE_CONFIG_H
+#include "../../config.h"
+#endif
+
+#ifdef HAVE_UDEV
+#include <libudev.h>
+#endif
+
+#include "../../configuration.h"
+#include "../../verbosity.h"
+#include "../../frontend/frontend_driver.h"
+#include "../common/drm_common.h"
+#include "../common/drm_hdr.h"
+#ifdef HAVE_WAYLAND
+#include "../common/wayland_drm_lease.h"
+#endif
+
+#ifdef HAVE_EGL
+#include "../common/egl_common.h"
+#endif
+
+#include "../common/gl_common.h"
+
+#ifdef HAVE_OPENGLES
+
+#ifndef EGL_OPENGL_ES3_BIT_KHR
+#define EGL_OPENGL_ES3_BIT_KHR 0x0040
+#endif
+
+#endif
+
+#ifndef EGL_PLATFORM_GBM_KHR
+#define EGL_PLATFORM_GBM_KHR 0x31D7
+#endif
+
+typedef struct gfx_ctx_drm_data
+{
+#ifdef HAVE_EGL
+   egl_ctx_data_t egl;
+#endif
+#ifdef HAVE_UDEV
+   struct udev *udev;
+   struct udev_monitor *hotplug;
+   dev_t hotplug_dev;
+   int hotplug_fd;
+   /* The monitor's revents from the flip wait, read in check_window,
+    * which runs on the same thread */
+   short hotplug_revents;
+#endif
+   struct gbm_bo *bo;
+   struct gbm_bo *next_bo;
+   struct gbm_surface *gbm_surface;
+   struct gbm_device  *gbm_dev;
+   int fd;
+   int interval;
+   unsigned fb_width;
+   unsigned fb_height;
+   /* Taken when the context is made, which a change of the setting
+    * redoes: swap_buffers runs on the thread that draws */
+   unsigned max_swapchain_images;
+   bool core_hw_context_enable;
+   bool waiting_for_flip;
+   bool leased;
+   bool lease_lost;
+   bool async_flip;
+   bool async_flip_refused;
+   /* The vsync setting, latched where the main thread waits */
+   bool video_vsync;
+   /* The GPUs the GL GPU index chooses from, as published to the menu */
+   struct string_list *gl_gpu_list;
+   /* HDR10: what the sink takes, and the connector properties changed
+    * for it with the values they had, put back on the way out */
+   drm_hdr_sink_t hdr_sink;
+   uint64_t hdr_orig_metadata;
+   uint64_t hdr_orig_colorspace;
+   uint64_t hdr_orig_bpc;
+   uint64_t hdr_colorspace_bt2020;
+   uint32_t hdr_prop_metadata;
+   uint32_t hdr_prop_colorspace;
+   uint32_t hdr_prop_bpc;
+   uint32_t hdr_blob;
+   bool hdr_capable;
+   bool hdr10;
+   bool hdr_props_set;
+#ifdef HAVE_UDEV
+   bool display_lost;
+#endif
+} gfx_ctx_drm_data_t;
+
+struct drm_fb
+{
+   struct gbm_bo *bo;
+   uint32_t fb_id;
+};
+
+
+static enum gfx_ctx_api drm_api           = GFX_CTX_NONE;
+/* 24 for XRGB8888 scanout, 30 for the XRGB2101010 of HDR10 */
+static unsigned drm_fb_depth               = 24;
+static drmModeModeInfo gfx_ctx_crt_switch_mode;
+static bool switch_mode                   = false;
+
+
+static EGLint *gfx_ctx_drm_egl_fill_attribs(
+      gfx_ctx_drm_data_t *drm, EGLint *attr)
+{
+   switch (drm_api)
+   {
+#ifdef EGL_KHR_create_context
+      case GFX_CTX_OPENGL_API:
+      {
+         bool debug       = false;
+#ifdef HAVE_OPENGL
+         unsigned version = drm->egl.major * 1000 + drm->egl.minor;
+         bool core        = version >= 3001;
+#ifdef GL_DEBUG
+         debug            = true;
+#else
+         struct retro_hw_render_callback *hwr = video_driver_get_hw_context();
+         debug           = hwr->debug_context;
+#endif
+
+         if (core)
+         {
+            *attr++ = EGL_CONTEXT_MAJOR_VERSION_KHR;
+            *attr++ = drm->egl.major;
+            *attr++ = EGL_CONTEXT_MINOR_VERSION_KHR;
+            *attr++ = drm->egl.minor;
+
+            /* Technically, we don't have core/compat until 3.2.
+             * Version 3.1 is either compat or not depending
+             * on GL_ARB_compatibility. */
+            if (version >= 3002)
+            {
+               *attr++ = EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR;
+               *attr++ = EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR;
+            }
+         }
+
+         if (debug)
+         {
+            *attr++ = EGL_CONTEXT_FLAGS_KHR;
+            *attr++ = EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR;
+         }
+         break;
+#endif
+      }
+#endif
+
+      case GFX_CTX_OPENGL_ES_API:
+#ifdef HAVE_OPENGLES
+         *attr++ = EGL_CONTEXT_CLIENT_VERSION;
+         *attr++ = drm->egl.major
+            ? (EGLint)drm->egl.major : 2;
+#ifdef EGL_KHR_create_context
+         if (drm->egl.minor > 0)
+         {
+            *attr++ = EGL_CONTEXT_MINOR_VERSION_KHR;
+            *attr++ = drm->egl.minor;
+         }
+#endif
+#endif
+         break;
+      case GFX_CTX_NONE:
+      default:
+         break;
+   }
+
+   *attr = EGL_NONE;
+   return attr;
+}
+
+#ifdef HAVE_EGL
+/* 10-bit scanout for HDR10: the same test for XRGB2101010 */
+static bool gbm_choose_xrgb2101010_cb(void *display_data, EGLDisplay dpy, EGLConfig config)
+{
+   EGLint r, g, b, id;
+   (void)display_data;
+
+   if (     !egl_get_config_attrib(dpy, config, EGL_RED_SIZE, &r)
+         || !egl_get_config_attrib(dpy, config, EGL_GREEN_SIZE, &g)
+         || !egl_get_config_attrib(dpy, config, EGL_BLUE_SIZE, &b))
+      return false;
+   if (r != 10 || g != 10 || b != 10)
+      return false;
+   if (!egl_get_config_attrib(dpy, config, EGL_NATIVE_VISUAL_ID, &id))
+      return false;
+   return id == GBM_FORMAT_XRGB2101010;
+}
+
+static bool gbm_choose_xrgb8888_cb(void *display_data, EGLDisplay dpy, EGLConfig config)
+{
+   EGLint r, g, b, id;
+   (void)display_data;
+
+   /* Makes sure we have 8 bit color. */
+   if (!egl_get_config_attrib(dpy, config, EGL_RED_SIZE, &r))
+      return false;
+   if (!egl_get_config_attrib(dpy, config, EGL_GREEN_SIZE, &g))
+      return false;
+   if (!egl_get_config_attrib(dpy, config, EGL_BLUE_SIZE, &b))
+      return false;
+
+   if (r != 8 || g != 8 || b != 8)
+      return false;
+
+   if (!egl_get_config_attrib(dpy, config, EGL_NATIVE_VISUAL_ID, &id))
+      return false;
+
+   return id == GBM_FORMAT_XRGB8888;
+}
+
+#define DRM_EGL_ATTRIBS_BASE \
+   EGL_SURFACE_TYPE,    EGL_WINDOW_BIT, \
+   EGL_RED_SIZE,        1, \
+   EGL_GREEN_SIZE,      1, \
+   EGL_BLUE_SIZE,       1, \
+   EGL_ALPHA_SIZE,      0, \
+   EGL_DEPTH_SIZE,      0
+
+static bool gfx_ctx_drm_egl_set_video_mode(gfx_ctx_drm_data_t *drm)
+{
+   const EGLint *attrib_ptr    = NULL;
+   static const EGLint egl_attribs_gl[] = {
+      DRM_EGL_ATTRIBS_BASE,
+      EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+      EGL_NONE,
+   };
+
+   static const EGLint egl_attribs_gles[] = {
+      DRM_EGL_ATTRIBS_BASE,
+      EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+      EGL_NONE,
+   };
+
+#ifdef EGL_KHR_create_context
+   static const EGLint egl_attribs_gles3[] = {
+      DRM_EGL_ATTRIBS_BASE,
+      EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
+      EGL_NONE,
+   };
+#endif
+
+#ifdef HAVE_VG
+   static const EGLint egl_attribs_vg[] = {
+      DRM_EGL_ATTRIBS_BASE,
+      EGL_RENDERABLE_TYPE, EGL_OPENVG_BIT,
+      EGL_NONE,
+   };
+#endif
+   EGLint major;
+   EGLint minor;
+   EGLint n;
+   EGLint egl_attribs[16];
+   EGLint *egl_attribs_ptr     = NULL;
+   EGLint *attr                = NULL;
+
+   switch (drm_api)
+   {
+      case GFX_CTX_OPENGL_API:
+#ifdef HAVE_OPENGL
+         attrib_ptr = egl_attribs_gl;
+         break;
+      case GFX_CTX_OPENGL_ES_API:
+#ifdef EGL_KHR_create_context
+         if (drm->egl.major >= 3)
+            attrib_ptr = egl_attribs_gles3;
+         else
+#endif
+         attrib_ptr = egl_attribs_gles;
+#endif
+         break;
+      case GFX_CTX_OPENVG_API:
+#ifdef HAVE_VG
+         attrib_ptr = egl_attribs_vg;
+#endif
+         break;
+      case GFX_CTX_NONE:
+      default:
+         break;
+   }
+
+#ifdef HAVE_EGL
+   if (!egl_init_context(&drm->egl, EGL_PLATFORM_GBM_KHR,
+            (EGLNativeDisplayType)drm->gbm_dev, &major,
+            &minor, &n, attrib_ptr, drm->hdr10
+            ? gbm_choose_xrgb2101010_cb : gbm_choose_xrgb8888_cb))
+      goto error;
+   if (drm->gl_gpu_list)
+      video_driver_set_gpu_api_devices(drm_api, drm->gl_gpu_list);
+
+   attr            = gfx_ctx_drm_egl_fill_attribs(drm, egl_attribs);
+   egl_attribs_ptr = &egl_attribs[0];
+
+   if (!egl_create_context(&drm->egl, (attr != egl_attribs_ptr)
+            ? egl_attribs_ptr : NULL))
+      goto error;
+
+   if (!egl_create_surface(&drm->egl, (EGLNativeWindowType)drm->gbm_surface))
+      return false;
+
+   switch (drm_api)
+   {
+      case GFX_CTX_OPENGL_API:
+      case GFX_CTX_OPENGL_ES_API:
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+         gl_clear();
+#endif
+         break;
+      case GFX_CTX_NONE:
+      default:
+         break;
+   }
+#endif
+
+   egl_swap_buffers(drm);
+
+   return true;
+
+error:
+   egl_report_error();
+   return false;
+}
+#endif
+
+
+static void drm_fb_destroy_callback(struct gbm_bo *bo, void *data)
+{
+   struct drm_fb *fb = (struct drm_fb*)data;
+
+   if (fb && fb->fb_id)
+      drmModeRmFB(g_drm_fd, fb->fb_id);
+
+   free(fb);
+}
+
+static struct drm_fb *drm_fb_get_from_bo(struct gbm_bo *bo)
+{
+   int ret;
+   unsigned width, height, stride, handle;
+   struct drm_fb *fb = (struct drm_fb*)calloc(1, sizeof(*fb));
+
+   fb->bo = bo;
+
+   width  = gbm_bo_get_width(bo);
+   height = gbm_bo_get_height(bo);
+   stride = gbm_bo_get_stride(bo);
+   handle = gbm_bo_get_handle(bo).u32;
+
+   RARCH_LOG("[KMS] New FB: %ux%u (stride: %u).\n",
+         width, height, stride);
+
+   /* Depth 30 is XRGB2101010, the HDR10 scanout */
+   ret = drmModeAddFB(g_drm_fd, width, height, drm_fb_depth, 32,
+         stride, handle, &fb->fb_id);
+   if (ret < 0)
+      goto error;
+
+   gbm_bo_set_user_data(bo, fb, drm_fb_destroy_callback);
+   return fb;
+
+error:
+   RARCH_ERR("[KMS] Failed to create FB.\n");
+   free(fb);
+   return NULL;
+}
+
+static void gfx_ctx_drm_swap_interval(void *data, int interval)
+{
+   gfx_ctx_drm_data_t *drm = (gfx_ctx_drm_data_t*)data;
+   drm->interval           = interval;
+   drm->video_vsync        = config_get_ptr()->bools.video_vsync;
+
+   if (interval > 1)
+      RARCH_WARN("[KMS] Swap intervals > 1 currently not supported. Will use swap interval of 1.\n");
+}
+
+#ifdef HAVE_UDEV
+static void gfx_ctx_drm_hotplug_init(gfx_ctx_drm_data_t *drm, int fd)
+{
+   struct stat st;
+   int flags;
+
+   drm->hotplug_fd = -1;
+
+   if (fstat(fd, &st) != 0 || !(drm->udev = udev_new()))
+      return;
+   drm->hotplug_dev = st.st_rdev;
+
+   if (!(drm->hotplug = udev_monitor_new_from_netlink(drm->udev, "udev")))
+      return;
+   if (     udev_monitor_filter_add_match_subsystem_devtype(drm->hotplug,
+               "drm", "drm_minor") < 0
+         || udev_monitor_enable_receiving(drm->hotplug) < 0
+         || (drm->hotplug_fd = udev_monitor_get_fd(drm->hotplug)) < 0
+         || (flags = fcntl(drm->hotplug_fd, F_GETFL)) < 0
+         || fcntl(drm->hotplug_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+   {
+      udev_monitor_unref(drm->hotplug);
+      drm->hotplug    = NULL;
+      drm->hotplug_fd = -1;
+   }
+}
+
+static void gfx_ctx_drm_hotplug_deinit(gfx_ctx_drm_data_t *drm)
+{
+   if (drm->hotplug)
+      udev_monitor_unref(drm->hotplug);
+   if (drm->udev)
+      udev_unref(drm->udev);
+   drm->hotplug         = NULL;
+   drm->udev            = NULL;
+   drm->hotplug_fd      = -1;
+   drm->hotplug_revents = 0;
+}
+
+/* The flip wait polls the monitor alongside the card, so a frame
+ * with nothing queued costs nothing here */
+static void gfx_ctx_drm_hotplug_read(gfx_ctx_drm_data_t *drm)
+{
+   struct udev_device *dev;
+   bool changed         = false;
+   short revents        = drm->hotplug_revents;
+
+   drm->hotplug_revents = 0;
+
+   if (revents & (POLLERR | POLLHUP | POLLNVAL))
+   {
+      RARCH_WARN("[KMS] Hotplug monitor failed, no longer watching.\n");
+      gfx_ctx_drm_hotplug_deinit(drm);
+      return;
+   }
+
+   while ((dev = udev_monitor_receive_device(drm->hotplug)))
+   {
+      const char *val;
+
+      if (     udev_device_get_devnum(dev) == drm->hotplug_dev
+            && (val = udev_device_get_property_value(dev, "HOTPLUG"))
+            && string_is_equal(val, "1"))
+         changed = true;
+      udev_device_unref(dev);
+   }
+
+   if (     changed
+         && drm_hotplug_needs_restart(g_drm_fd,
+               config_get_ptr()->uints.video_monitor_index,
+               &drm->display_lost))
+   {
+      RARCH_LOG("[KMS] Display changed, restarting the video driver.\n");
+      video_driver_modify_disp_flags(VIDEO_FLAG_DRIVER_REINIT, 0);
+   }
+}
+#endif
+
+static void gfx_ctx_drm_check_window(void *data, bool *quit,
+      bool *resize, unsigned *dims)
+{
+   *resize = false;
+   *quit   = (bool)frontend_driver_get_signal_handler_state();
+   *dims = VIDEO_SCALE_PACK(g_drm_mode->hdisplay, g_drm_mode->vdisplay);
+#ifdef HAVE_UDEV
+   if (((gfx_ctx_drm_data_t*)data)->hotplug_revents)
+      gfx_ctx_drm_hotplug_read((gfx_ctx_drm_data_t*)data);
+#endif
+}
+
+static void drm_flip_handler(int fd, unsigned frame,
+      unsigned sec, unsigned usec, void *data)
+{
+   *(bool*)data = false;
+}
+
+static bool gfx_ctx_drm_wait_flip(gfx_ctx_drm_data_t *drm, bool block)
+{
+   int timeout = 0;
+
+   if (!drm->waiting_for_flip)
+      return false;
+
+   if (block)
+      timeout = -1;
+
+   while (drm->waiting_for_flip)
+   {
+#ifdef HAVE_UDEV
+      if (!drm_wait_flip_hotplug(timeout,
+               drm->hotplug_revents ? -1 : drm->hotplug_fd,
+               &drm->hotplug_revents))
+#else
+      if (!drm_wait_flip(timeout))
+#endif
+         break;
+   }
+
+   if (drm->waiting_for_flip)
+      return true;
+
+   /* Page flip has taken place. */
+
+   /* This buffer is not on-screen anymore. Release it to GBM. */
+   gbm_surface_release_buffer(drm->gbm_surface, drm->bo);
+   /* This buffer is being shown now. */
+   drm->bo = drm->next_bo;
+
+   return false;
+}
+
+static bool gfx_ctx_drm_queue_flip(gfx_ctx_drm_data_t *drm)
+{
+   struct drm_fb *fb     = NULL;
+   struct gbm_bo *next_bo = gbm_surface_lock_front_buffer(drm->gbm_surface);
+
+   if (!next_bo)
+   {
+      RARCH_DBG(
+            "[KMS] gbm_surface_lock_front_buffer failed: "
+            "surface=%p size=%ux%u errno=%d (%s).\n",
+            (void *)drm->gbm_surface,
+            drm->fb_width,
+            drm->fb_height,
+            errno,
+            strerror(errno));
+      return false;
+   }
+
+   drm->next_bo = next_bo;
+   fb           = (struct drm_fb*)gbm_bo_get_user_data(drm->next_bo);
+
+   if (!fb)
+      fb        = (struct drm_fb*)drm_fb_get_from_bo(drm->next_bo);
+
+   if (!fb)
+   {
+      /* No framebuffer could be associated with the buffer object;
+       * release it and drop the frame rather than dereferencing NULL. */
+      RARCH_ERR("[KMS] Failed to obtain a framebuffer for the buffer object.\n");
+      gbm_surface_release_buffer(drm->gbm_surface, drm->next_bo);
+      drm->next_bo = NULL;
+      return false;
+   }
+
+   if (switch_mode)
+   {
+      int ret;
+      RARCH_DBG("[KMS] modeswitch detected, creating the new CRTC.\n");
+      ret = drmModeSetCrtc(g_drm_fd, g_crtc_id, fb->fb_id, 0, 0, &g_connector_id, 1, g_drm_mode);
+      if (ret != 0)
+      {
+         RARCH_ERR(
+               "[KMS] drmModeSetCrtc failed for %ux%u%s: "
+               "ret=%d errno=%d (%s), clock=%u flags=0x%x\n",
+               g_drm_mode->hdisplay,
+               g_drm_mode->vdisplay,
+               (g_drm_mode->flags & DRM_MODE_FLAG_INTERLACE) ? "i" : "p",
+               ret,
+               errno,
+               strerror(errno),
+               g_drm_mode->clock,
+               g_drm_mode->flags);
+
+         gbm_surface_release_buffer(drm->gbm_surface, drm->next_bo);
+         drm->next_bo = NULL;
+
+         /* Keep running on the previous valid mode.
+          * A later frame may provide a better geometry/mode. */
+         switch_mode = false;
+         return false;
+      }
+      switch_mode = false;
+   }
+
+   /* Vsync off tears, while fast-forward with vsync on drops frames
+    * as Vulkan's MAILBOX does; a refused async flip (a format or
+    * layout change, as around a mode switch) waits for vblank this
+    * once */
+   if (     drm->interval == 0
+         && drm->async_flip
+         && !drm->video_vsync)
+   {
+      if (drmModePageFlip(g_drm_fd, g_crtc_id, fb->fb_id,
+            DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_PAGE_FLIP_ASYNC,
+            &drm->waiting_for_flip) == 0)
+         return true;
+
+      if (!drm->async_flip_refused)
+      {
+         drm->async_flip_refused = true;
+         RARCH_WARN("[KMS] Async page flip refused: %s.\n", strerror(errno));
+      }
+   }
+
+   if (drmModePageFlip(g_drm_fd, g_crtc_id, fb->fb_id,
+         DRM_MODE_PAGE_FLIP_EVENT, &drm->waiting_for_flip) == 0)
+      return true;
+
+#ifdef HAVE_WAYLAND
+   /* A lease the compositor has taken back fails here first, and
+    * looks like any other flip failure until it is asked. Once. */
+   if (drm->leased && !drm->lease_lost && wayland_drm_lease_revoked())
+   {
+      drm->lease_lost = true;
+      RARCH_ERR("[KMS] The compositor took the leased connector back.\n");
+   }
+#endif
+
+   /* Failed to queue page flip. */
+   return false;
+}
+
+static void gfx_ctx_drm_swap_buffers(void *data)
+{
+   gfx_ctx_drm_data_t        *drm = (gfx_ctx_drm_data_t*)data;
+   unsigned max_swapchain_images  = drm->max_swapchain_images;
+
+   /* Recreate the surface */
+   if (switch_mode)
+   {
+      RARCH_DBG("[KMS] modeswitch detected, doing GBM and EGL stuff.\n");
+      if (drm->gbm_surface)
+      {
+         if (drm->bo)
+            gbm_surface_release_buffer(drm->gbm_surface, drm->bo);
+         if (drm->next_bo)
+            gbm_surface_release_buffer(drm->gbm_surface, drm->next_bo);
+         egl_destroy_surface(&drm->egl);
+
+         gbm_surface_destroy(drm->gbm_surface);
+      }
+      drm->gbm_surface = gbm_surface_create(
+            drm->gbm_dev,
+            drm->fb_width,
+            drm->fb_height,
+            drm->hdr10 ? GBM_FORMAT_XRGB2101010 : GBM_FORMAT_XRGB8888,
+            GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+
+      if (!drm->gbm_surface)
+         RARCH_ERR("[KMS] Couldn't create GBM surface.\n");
+
+      /* Creates an EGL surface and make it current */
+      egl_create_surface(&drm->egl, (EGLNativeWindowType)drm->gbm_surface);
+      egl_bind_hw_render(&drm->egl, true);
+   }
+
+#ifdef HAVE_EGL
+   egl_swap_buffers(&drm->egl);
+#endif
+
+   /* I guess we have to wait for flip to have taken
+    * place before another flip can be queued up.
+    *
+    * If true, we are still waiting for a flip
+    * (nonblocking mode, so just drop the frame). */
+   if (gfx_ctx_drm_wait_flip(drm, drm->interval))
+      return;
+
+   drm->waiting_for_flip = gfx_ctx_drm_queue_flip(drm);
+
+   /* Triple-buffered page flips */
+   if (     max_swapchain_images >= 3
+         && gbm_surface_has_free_buffers(drm->gbm_surface))
+      return;
+
+   gfx_ctx_drm_wait_flip(drm, true);
+}
+
+static void gfx_ctx_drm_get_video_size(void *data,
+      unsigned *dims)
+{
+   gfx_ctx_drm_data_t *drm = (gfx_ctx_drm_data_t*)data;
+
+   if (!drm)
+      return;
+
+   *dims = VIDEO_SCALE_PACK(drm->fb_width, drm->fb_height);
+}
+
+static void gfx_ctx_drm_get_video_output_size(void *data,
+      unsigned *dims, char *desc, size_t desc_len)
+{
+   gfx_ctx_drm_data_t *drm = (gfx_ctx_drm_data_t*)data;
+
+   if (!drm)
+      return;
+
+   *dims = VIDEO_SCALE_PACK(drm->fb_width, drm->fb_height);
+}
+
+static void free_drm_resources(gfx_ctx_drm_data_t *drm)
+{
+   if (!drm)
+      return;
+
+   /* Restore original CRTC. */
+   drm_restore_crtc();
+
+   if (drm->gbm_surface)
+      gbm_surface_destroy(drm->gbm_surface);
+
+   if (drm->gbm_dev)
+      gbm_device_destroy(drm->gbm_dev);
+
+   drm_free();
+
+   if (drm->fd >= 0)
+   {
+#ifdef HAVE_WAYLAND
+      if (drm->leased)
+      {
+         /* The lease owns the descriptor, and master came with it */
+         wayland_drm_lease_release();
+         drm->leased = false;
+      }
+      else
+#endif
+      if (g_drm_fd >= 0)
+      {
+         drmDropMaster(g_drm_fd);
+         close(drm->fd);
+      }
+   }
+
+   drm->fd            = -1;
+   drm->gbm_surface   = NULL;
+   drm->gbm_dev       = NULL;
+   g_drm_fd           = -1;
+}
+
+/* The connector property 'name': its id, 0 where it has none, with its
+ * current value and, when asked for, its description. */
+static uint32_t gfx_ctx_drm_connector_prop(const char *name,
+      uint64_t *value, drmModePropertyRes **info)
+{
+   uint32_t i, id = 0;
+   drmModeObjectProperties *props = drmModeObjectGetProperties(g_drm_fd,
+         g_connector_id, DRM_MODE_OBJECT_CONNECTOR);
+
+   if (!props)
+      return 0;
+   for (i = 0; i < props->count_props && !id; i++)
+   {
+      drmModePropertyRes *p = drmModeGetProperty(g_drm_fd, props->props[i]);
+      if (!p)
+         continue;
+      if (string_is_equal(p->name, name))
+      {
+         id = p->prop_id;
+         if (value)
+            *value = props->prop_values[i];
+         if (info)
+         {
+            *info = p;
+            p     = NULL;
+         }
+      }
+      if (p)
+         drmModeFreeProperty(p);
+   }
+   drmModeFreeObjectProperties(props);
+   return id;
+}
+
+/* Puts back what HDR10 changed on the connector */
+static void gfx_ctx_drm_hdr_restore(gfx_ctx_drm_data_t *drm)
+{
+   if (!drm->hdr_props_set)
+      return;
+   drmModeConnectorSetProperty(g_drm_fd, g_connector_id,
+         drm->hdr_prop_metadata, drm->hdr_orig_metadata);
+   drmModeConnectorSetProperty(g_drm_fd, g_connector_id,
+         drm->hdr_prop_colorspace, drm->hdr_orig_colorspace);
+   if (drm->hdr_prop_bpc)
+      drmModeConnectorSetProperty(g_drm_fd, g_connector_id,
+            drm->hdr_prop_bpc, drm->hdr_orig_bpc);
+   if (drm->hdr_blob)
+      drmModeDestroyPropertyBlob(g_drm_fd, drm->hdr_blob);
+   drm->hdr_blob      = 0;
+   drm->hdr_props_set = false;
+}
+
+/* Whether this connector's sink takes HDR10 and the connector can say
+ * so: the EDID's HDR static metadata block, HDR_OUTPUT_METADATA, and a
+ * Colorspace property with BT2020_RGB. */
+static void gfx_ctx_drm_hdr_probe(gfx_ctx_drm_data_t *drm)
+{
+   uint64_t edid_id           = 0;
+   drmModePropertyRes *cs     = NULL;
+   drmModePropertyBlobRes *eb = NULL;
+   bool bt2020                = false;
+   int i;
+
+   drm->hdr_capable = false;
+   if (     !gfx_ctx_drm_connector_prop("EDID", &edid_id, NULL)
+         || !edid_id
+         || !(eb = drmModeGetPropertyBlob(g_drm_fd, (uint32_t)edid_id)))
+      return;
+   if (!drm_hdr_parse_edid((const uint8_t*)eb->data, eb->length,
+            &drm->hdr_sink))
+   {
+      drmModeFreePropertyBlob(eb);
+      return;
+   }
+   drmModeFreePropertyBlob(eb);
+
+   drm->hdr_prop_metadata   = gfx_ctx_drm_connector_prop(
+         "HDR_OUTPUT_METADATA", &drm->hdr_orig_metadata, NULL);
+   drm->hdr_prop_colorspace = gfx_ctx_drm_connector_prop(
+         "Colorspace", &drm->hdr_orig_colorspace, &cs);
+   drm->hdr_prop_bpc        = gfx_ctx_drm_connector_prop(
+         "max bpc", &drm->hdr_orig_bpc, NULL);
+   if (cs)
+   {
+      for (i = 0; i < cs->count_enums; i++)
+         if (string_is_equal(cs->enums[i].name, "BT2020_RGB"))
+         {
+            drm->hdr_colorspace_bt2020 = cs->enums[i].value;
+            bt2020                     = true;
+         }
+      drmModeFreeProperty(cs);
+   }
+   drm->hdr_capable = drm->hdr_prop_metadata && drm->hdr_prop_colorspace
+      && bt2020;
+   if (drm->hdr_sink.max_nits > 0.0f)
+   {
+      video_driver_set_display_peak_nits(drm->hdr_sink.max_nits);
+      RARCH_LOG("[KMS] Display peak luminance: %.0f nits (from its EDID).\n",
+            drm->hdr_sink.max_nits);
+   }
+}
+
+/* Tells the sink HDR10 is coming: static metadata, Rec.2020, 10 bits.
+ * On any refusal what was changed is put back and the output stays
+ * SDR, so a PQ picture never reaches a sink not told to expect it. */
+static bool gfx_ctx_drm_hdr_apply(gfx_ctx_drm_data_t *drm)
+{
+   drm_hdr_output_metadata_t meta;
+   settings_t *settings = config_get_ptr();
+
+   (void)settings;
+   drm_hdr_build_metadata(&meta, &drm->hdr_sink,
+         video_driver_get_hdr_max_nits());
+   if (drmModeCreatePropertyBlob(g_drm_fd, &meta, sizeof(meta),
+            &drm->hdr_blob))
+   {
+      drm->hdr_blob = 0;
+      return false;
+   }
+   drm->hdr_props_set = true;
+   if (     drmModeConnectorSetProperty(g_drm_fd, g_connector_id,
+               drm->hdr_prop_metadata, drm->hdr_blob)
+         || drmModeConnectorSetProperty(g_drm_fd, g_connector_id,
+               drm->hdr_prop_colorspace, drm->hdr_colorspace_bt2020))
+   {
+      gfx_ctx_drm_hdr_restore(drm);
+      return false;
+   }
+   /* The link at 10 bits or more where the connector lets it be set */
+   if (drm->hdr_prop_bpc && drm->hdr_orig_bpc < 10)
+      drmModeConnectorSetProperty(g_drm_fd, g_connector_id,
+            drm->hdr_prop_bpc, 10);
+   return true;
+}
+
+static void gfx_ctx_drm_destroy_resources(gfx_ctx_drm_data_t *drm)
+{
+   if (!drm)
+      return;
+
+   /* Make sure we acknowledge all page-flips. */
+   gfx_ctx_drm_wait_flip(drm, true);
+
+   /* The sink back to SDR, and this context's HDR settings with it */
+   gfx_ctx_drm_hdr_restore(drm);
+   drm->hdr10        = false;
+   drm->hdr_capable  = false;
+   drm_fb_depth      = 24;
+   video_driver_set_display_peak_nits(0.0f);
+   video_driver_modify_disp_flags(0,
+           VIDEO_FLAG_HDR_SUPPORT
+         | VIDEO_FLAG_HDR10_SUPPORT
+         | VIDEO_FLAG_SCRGB_SUPPORT);
+
+#ifdef HAVE_UDEV
+   gfx_ctx_drm_hotplug_deinit(drm);
+#endif
+
+#ifdef HAVE_EGL
+   egl_destroy(&drm->egl);
+#endif
+
+   free_drm_resources(drm);
+
+   g_drm_mode          = NULL;
+   g_crtc_id           = 0;
+   g_connector_id      = 0;
+
+   drm->fb_width       = 0;
+   drm->fb_height      = 0;
+
+   drm->bo             = NULL;
+   drm->next_bo        = NULL;
+
+   if (drm->gl_gpu_list)
+   {
+      video_driver_set_gpu_api_devices(drm_api, NULL);
+      string_list_free(drm->gl_gpu_list);
+      drm->gl_gpu_list = NULL;
+   }
+}
+
+static void *gfx_ctx_drm_init(void *video_driver)
+{
+   int fd, i;
+   unsigned monitor_index;
+   unsigned gpu_index                   = 0;
+   const char *gpu                      = NULL;
+   const char *preferred                = NULL;
+   bool was_preferred                   = false;
+   struct string_list *gpu_descriptors  = NULL;
+   settings_t *settings                 = config_get_ptr();
+   gfx_ctx_drm_data_t *drm              = (gfx_ctx_drm_data_t*)
+      calloc(1, sizeof(gfx_ctx_drm_data_t));
+   unsigned video_monitor_index         = settings->uints.video_monitor_index;
+
+   if (!drm)
+      return NULL;
+   drm->fd                   = -1;
+#ifdef HAVE_UDEV
+   drm->hotplug_fd           = -1;
+#endif
+   drm->max_swapchain_images = settings->uints.video_max_swapchain_images;
+
+   gpu_descriptors = dir_list_new("/dev/dri", NULL, false, true, false, false);
+
+#ifdef HAVE_WAYLAND
+   /* A Wayland compositor holds DRM master, so a card opened here
+    * could never modeset. A leased connector comes with master for
+    * its own objects, and resources on that descriptor are only the
+    * leased ones - the head is already chosen, hence index 0. */
+   drm->fd = wayland_drm_lease_acquire((int)video_monitor_index);
+   if (drm->fd >= 0)
+   {
+      drm->leased = true;
+      fd          = drm->fd;
+
+      if (     !drm_get_resources(fd)
+            || !drm_get_connector(fd, 0)
+            || !drm_get_encoder(fd))
+      {
+         RARCH_ERR("[KMS] The leased connector could not be set up.\n");
+         goto error;
+      }
+
+      drm_setup(fd);
+      goto have_device;
+   }
+   drm->fd = -1;
+#endif
+
+#ifdef HAVE_EGL
+   /* The GL GPU index: the chosen EGL device's card is tried first and
+    * the others in their usual order after it; the display follows the
+    * card, through GBM. */
+   drm->gl_gpu_list = egl_gpu_list_new();
+   if (drm->gl_gpu_list && settings)
+      settings->ints.gl_gpu_index = video_driver_gpu_index_resolve(
+            drm_api, settings->ints.gl_gpu_index, drm->gl_gpu_list);
+   if (drm->gl_gpu_list && settings->ints.gl_gpu_index > 0)
+   {
+      if ((preferred = egl_gpu_device_file(settings->ints.gl_gpu_index)))
+         RARCH_LOG("[KMS] Using GPU #%d: \"%s\".\n",
+               settings->ints.gl_gpu_index,
+               drm->gl_gpu_list->elems[settings->ints.gl_gpu_index].data);
+      else
+         RARCH_WARN("[KMS] GPU #%d not found; using the first suitable card.\n",
+               settings->ints.gl_gpu_index);
+   }
+#endif
+
+nextgpu:
+   free_drm_resources(drm);
+
+   if (was_preferred)
+   {
+      RARCH_WARN("[KMS] The chosen GPU has no usable output; trying the others.\n");
+      was_preferred = false;
+   }
+
+   if (preferred)
+   {
+      gpu           = preferred;
+      preferred     = NULL;
+      was_preferred = true;
+   }
+   else
+   {
+      if (!gpu_descriptors || gpu_index == gpu_descriptors->size)
+      {
+         RARCH_ERR("[KMS] Couldn't find a suitable DRM device.\n");
+         goto error;
+      }
+      gpu = gpu_descriptors->elems[gpu_index++].data;
+   }
+
+   drm->fd    = open(gpu, O_RDWR);
+   if (drm->fd < 0)
+   {
+      RARCH_WARN("[KMS] Couldn't open DRM device.\n");
+      goto nextgpu;
+   }
+
+   fd = drm->fd;
+
+   if (!drm_get_resources(fd))
+      goto nextgpu;
+
+   if (!drm_get_connector(fd, video_monitor_index))
+      goto nextgpu;
+
+   if (!drm_get_encoder(fd))
+      goto nextgpu;
+
+   drm_setup(fd);
+
+#ifdef HAVE_WAYLAND
+have_device:
+#endif
+   /* Choose the optimal video mode for get_video_size():
+     - video mode issued by switchres through the CRT module
+     - custom timings from configuration
+     - else the current video mode from the CRTC
+     - otherwise pick first connector mode */
+   if (drm_mode_from_crt_switch(&gfx_ctx_crt_switch_mode))
+   {
+      drm->fb_width  = gfx_ctx_crt_switch_mode.hdisplay;
+      drm->fb_height = gfx_ctx_crt_switch_mode.vdisplay;
+   }
+   else if (drm_mode_from_timings(
+            config_get_ptr()->arrays.crt_switch_timings,
+            &gfx_ctx_crt_switch_mode))
+   {
+      drm->fb_width  = gfx_ctx_crt_switch_mode.hdisplay;
+      drm->fb_height = gfx_ctx_crt_switch_mode.vdisplay;
+   }
+   else if (g_orig_crtc->mode_valid)
+   {
+      drm->fb_width  = g_orig_crtc->mode.hdisplay;
+      drm->fb_height = g_orig_crtc->mode.vdisplay;
+   }
+   else
+   {
+      drm->fb_width  = g_drm_connector->modes[0].hdisplay;
+      drm->fb_height = g_drm_connector->modes[0].vdisplay;
+   }
+
+   /* A lease carries master for the objects it granted; asking for
+    * it again is neither needed nor permitted. */
+   if (!drm->leased)
+      drmSetMaster(g_drm_fd);
+
+   drm->gbm_dev      = gbm_create_device(fd);
+
+   if (!drm->gbm_dev)
+   {
+      RARCH_WARN("[KMS] Couldn't create GBM device.\n");
+      if (drm->leased)
+         goto error;
+      goto nextgpu;
+   }
+
+   dir_list_free(gpu_descriptors);
+
+   /* Setup the flip handler. */
+   g_drm_fds.fd                   = fd;
+   g_drm_fds.events               = POLLIN;
+   g_drm_evctx.version            = DRM_EVENT_CONTEXT_VERSION;
+   g_drm_evctx.page_flip_handler  = drm_flip_handler;
+
+   g_drm_fd                       = fd;
+
+#ifdef HAVE_UDEV
+   /* A lease is for one connector */
+   if (!drm->leased)
+      gfx_ctx_drm_hotplug_init(drm, fd);
+#endif
+
+   {
+      uint64_t cap                = 0;
+      drm->async_flip             = drmGetCap(fd,
+            DRM_CAP_ASYNC_PAGE_FLIP, &cap) == 0 && cap;
+   }
+
+   video_driver_display_type_set(RARCH_DISPLAY_KMS);
+
+   return drm;
+
+error:
+   dir_list_free(gpu_descriptors);
+
+   gfx_ctx_drm_destroy_resources(drm);
+
+   if (drm)
+      free(drm);
+
+   return NULL;
+}
+
+static bool gfx_ctx_drm_set_video_mode(void *data,
+      unsigned dims,
+      bool fullscreen)
+{
+   unsigned width  = VIDEO_SCALE_W(dims);
+   unsigned height = VIDEO_SCALE_H(dims);
+   float refresh_mod;
+   int ret                         = 0;
+   struct drm_fb *fb               = NULL;
+   struct gbm_bo *bo               = NULL;
+   gfx_ctx_drm_data_t *drm         = (gfx_ctx_drm_data_t*)data;
+   settings_t *settings            = config_get_ptr();
+   unsigned black_frame_insertion  = settings->uints.video_black_frame_insertion;
+   float video_refresh_rate        = settings->floats.video_refresh_rate;
+
+   if (!drm)
+      return false;
+
+   frontend_driver_install_signal_handler();
+   /* If we use black frame insertion,
+    * we fake a 60 Hz monitor for 120 Hz one,
+    * etc, so try to match that. */
+   refresh_mod                     = 1.0f / (black_frame_insertion + 1.0f);
+
+   /* Find desired video mode, and use that.
+    * If not fullscreen, we get desired windowed size,
+    * which is not appropriate. */
+   if (drm_mode_from_crt_switch(&gfx_ctx_crt_switch_mode))
+   {
+      RARCH_DBG("[KMS] New mode detected: %dx%d.\n", gfx_ctx_crt_switch_mode.hdisplay, gfx_ctx_crt_switch_mode.vdisplay);
+      g_drm_mode     = &gfx_ctx_crt_switch_mode;
+      drm->fb_width  = gfx_ctx_crt_switch_mode.hdisplay;
+      drm->fb_height = gfx_ctx_crt_switch_mode.vdisplay;
+      switch_mode    = true;
+      /* Let's exit, since modeswitching will happen while swapping buffers */
+      return true;
+   }
+   if ((width == 0 && height == 0) || !fullscreen)
+   {
+      RARCH_WARN("[KMS] Falling back to mode 0 (default).\n");
+      g_drm_mode     = &g_drm_connector->modes[0];
+   }
+   else
+   {
+      /* check if custom HDMI timings were asked */
+      if (gfx_ctx_crt_switch_mode.vdisplay > 0)
+      {
+         RARCH_LOG("[KMS] Custom mode requested: %s.\n", gfx_ctx_crt_switch_mode.name);
+         g_drm_mode  = &gfx_ctx_crt_switch_mode;
+      }
+      else
+      {
+         g_drm_mode = drm_find_mode(g_drm_connector, width, height,
+               refresh_mod, video_refresh_rate);
+      }
+   }
+
+   if (!g_drm_mode)
+   {
+      RARCH_ERR("[KMS] Did not find suitable video mode for %ux%u.\n",
+            width, height);
+      goto error;
+   }
+
+   drm->fb_width                   = g_drm_mode->hdisplay;
+   drm->fb_height                  = g_drm_mode->vdisplay;
+
+   /* HDR10: offered where the sink and the connector take it, used
+    * when it is on; GL's HDR output here is HDR10 only. */
+   gfx_ctx_drm_hdr_restore(drm);
+   drm->hdr10 = false;
+   gfx_ctx_drm_hdr_probe(drm);
+   video_driver_modify_disp_flags(0,
+           VIDEO_FLAG_HDR_SUPPORT
+         | VIDEO_FLAG_HDR10_SUPPORT
+         | VIDEO_FLAG_SCRGB_SUPPORT);
+   if (drm->hdr_capable)
+   {
+      settings_t *settings = config_get_ptr();
+      video_driver_modify_disp_flags(
+            VIDEO_FLAG_HDR_SUPPORT | VIDEO_FLAG_HDR10_SUPPORT,
+            VIDEO_FLAG_SCRGB_SUPPORT);
+      if (settings && settings->uints.video_hdr_mode > 0)
+      {
+         if (gfx_ctx_drm_hdr_apply(drm))
+         {
+            drm->hdr10 = true;
+            RARCH_LOG("[KMS] HDR10 output: Rec.2020 PQ, 10-bit scanout.\n");
+            if (settings->uints.video_hdr_mode == 2)
+               RARCH_LOG("[KMS] OpenGL HDR output here is HDR10-only; the scRGB setting maps to HDR10.\n");
+         }
+         else
+            RARCH_WARN("[KMS] The connector refused the HDR10 properties; staying SDR.\n");
+      }
+   }
+   drm_fb_depth = drm->hdr10 ? 30 : 24;
+
+   /* Create GBM surface. */
+   drm->gbm_surface                = gbm_surface_create(
+         drm->gbm_dev,
+         drm->fb_width,
+         drm->fb_height,
+         drm->hdr10 ? GBM_FORMAT_XRGB2101010 : GBM_FORMAT_XRGB8888,
+         GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+
+   if (!drm->gbm_surface && drm->hdr10)
+   {
+      RARCH_WARN("[KMS] No 10-bit GBM surface; staying SDR.\n");
+      gfx_ctx_drm_hdr_restore(drm);
+      drm->hdr10   = false;
+      drm_fb_depth = 24;
+      drm->gbm_surface = gbm_surface_create(drm->gbm_dev,
+            drm->fb_width, drm->fb_height, GBM_FORMAT_XRGB8888,
+            GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+   }
+
+   if (!drm->gbm_surface)
+   {
+      RARCH_ERR("[KMS] Couldn't create GBM surface.\n");
+      goto error;
+   }
+
+#ifdef HAVE_EGL
+   if (!gfx_ctx_drm_egl_set_video_mode(drm))
+   {
+      if (!drm->hdr10)
+         goto error;
+      /* No 10-bit EGL config: SDR on an ordinary surface */
+      RARCH_WARN("[KMS] No 10-bit EGL config; staying SDR.\n");
+      gfx_ctx_drm_hdr_restore(drm);
+      drm->hdr10   = false;
+      drm_fb_depth = 24;
+      gbm_surface_destroy(drm->gbm_surface);
+      if (     !(drm->gbm_surface = gbm_surface_create(drm->gbm_dev,
+                  drm->fb_width, drm->fb_height, GBM_FORMAT_XRGB8888,
+                  GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING))
+            || !gfx_ctx_drm_egl_set_video_mode(drm))
+         goto error;
+   }
+#endif
+
+   bo = gbm_surface_lock_front_buffer(drm->gbm_surface);
+   if (!bo)
+      goto error;
+   drm->bo   = bo;
+
+   if (!(fb = (struct drm_fb*)gbm_bo_get_user_data(drm->bo)))
+      fb     = drm_fb_get_from_bo(drm->bo);
+
+   if ((ret  = drmModeSetCrtc(g_drm_fd,
+         g_crtc_id, fb->fb_id, 0, 0, &g_connector_id, 1, g_drm_mode)) < 0)
+      goto error;
+
+   video_driver_set_hdr_output_mode(drm->hdr10 ? 1 : 0);
+   return true;
+
+error:
+   gfx_ctx_drm_destroy_resources(drm);
+   RARCH_ERR("[KMS] Error when switching mode.\n");
+
+   if (drm)
+      free(drm);
+
+   return false;
+}
+
+static void gfx_ctx_drm_destroy(void *data)
+{
+   gfx_ctx_drm_data_t *drm = (gfx_ctx_drm_data_t*)data;
+
+   if (!drm)
+      return;
+
+   gfx_ctx_drm_destroy_resources(drm);
+   free(drm);
+}
+
+static void gfx_ctx_drm_input_driver(void *data,
+      const char *joypad_name)
+{
+   /* no input driver of this context's own: the frontend starts the
+    * one that goes with a display that has no window system */
+   input_driver_video_window(INPUT_WINDOW_KMS, NULL);
+}
+
+static bool gfx_ctx_drm_has_focus(void *data) { return true; }
+
+static bool gfx_ctx_drm_suppress_screensaver(void *data, bool enable) { return false; }
+
+static enum gfx_ctx_api gfx_ctx_drm_get_api(void *data) { return drm_api; }
+
+static bool gfx_ctx_drm_bind_api(void *video_driver,
+      enum gfx_ctx_api api, unsigned major, unsigned minor)
+{
+   drm_api     = api;
+#ifdef HAVE_EGL
+   g_egl_major = major;
+   g_egl_minor = minor;
+#endif
+
+   switch (api)
+   {
+      case GFX_CTX_OPENGL_API:
+#if defined(HAVE_EGL) && defined(HAVE_OPENGL)
+
+#ifndef EGL_KHR_create_context
+         if ((major * 1000 + minor) >= 3001)
+            return false;
+#endif
+         return egl_bind_api(EGL_OPENGL_API);
+#else
+         break;
+#endif
+      case GFX_CTX_OPENGL_ES_API:
+#if defined(HAVE_EGL) && defined(HAVE_OPENGLES)
+
+#ifndef EGL_KHR_create_context
+         if (major >= 3)
+            return false;
+#endif
+         return egl_bind_api(EGL_OPENGL_ES_API);
+#else
+         break;
+#endif
+      case GFX_CTX_OPENVG_API:
+#if defined(HAVE_EGL) && defined(HAVE_VG)
+         return egl_bind_api(EGL_OPENVG_API);
+#endif
+      case GFX_CTX_NONE:
+      default:
+         break;
+   }
+
+   return false;
+}
+
+static void gfx_ctx_drm_bind_hw_render(void *data, bool enable)
+{
+#ifdef HAVE_EGL
+   gfx_ctx_drm_data_t *drm     = (gfx_ctx_drm_data_t*)data;
+   egl_bind_hw_render(&drm->egl, enable);
+#endif
+}
+
+static uint32_t gfx_ctx_drm_get_flags(void *data)
+{
+   uint32_t             flags = 0;
+   gfx_ctx_drm_data_t    *drm = (gfx_ctx_drm_data_t*)data;
+
+   BIT32_SET(flags, GFX_CTX_FLAGS_CUSTOMIZABLE_SWAPCHAIN_IMAGES);
+
+   if (drm->core_hw_context_enable)
+      BIT32_SET(flags, GFX_CTX_FLAGS_GL_CORE_CONTEXT);
+   if (drm->hdr10)
+      BIT32_SET(flags, GFX_CTX_FLAGS_HDR10_FRAMEBUFFER);
+
+   if (string_is_equal(video_driver_get_ident(), "glcore"))
+   {
+#if defined(HAVE_SLANG) && (defined(HAVE_SPIRV_CROSS) || defined(HAVE_RSLC))
+      BIT32_SET(flags, GFX_CTX_FLAGS_SHADERS_SLANG);
+#endif
+   }
+   else
+   {
+#ifdef HAVE_GLSL
+      BIT32_SET(flags, GFX_CTX_FLAGS_SHADERS_GLSL);
+#endif
+   }
+
+   BIT32_SET(flags, GFX_CTX_FLAGS_CRT_SWITCHRES);
+
+   return flags;
+}
+
+static void gfx_ctx_drm_set_flags(void *data, uint32_t flags)
+{
+   gfx_ctx_drm_data_t *drm     = (gfx_ctx_drm_data_t*)data;
+   if (BIT32_GET(flags, GFX_CTX_FLAGS_GL_CORE_CONTEXT))
+      drm->core_hw_context_enable = true;
+}
+
+static bool gfx_ctx_drm_create_surface(void *data)
+{
+#ifdef HAVE_EGL
+   gfx_ctx_drm_data_t *drm = (gfx_ctx_drm_data_t*)data;
+   return egl_create_surface(&drm->egl, (EGLNativeWindowType)drm->gbm_surface);
+#else
+   return false;
+#endif
+}
+
+static bool gfx_ctx_drm_destroy_surface(void *data)
+{
+#ifdef HAVE_EGL
+   gfx_ctx_drm_data_t *drm = (gfx_ctx_drm_data_t*)data;
+   return egl_destroy_surface(&drm->egl);
+#else
+   return false;
+#endif
+}
+
+const gfx_ctx_driver_t gfx_ctx_drm = {
+   gfx_ctx_drm_init,
+   gfx_ctx_drm_destroy,
+   gfx_ctx_drm_get_api,
+   gfx_ctx_drm_bind_api,
+   gfx_ctx_drm_swap_interval,
+   gfx_ctx_drm_set_video_mode,
+   gfx_ctx_drm_get_video_size,
+   NULL, /* refresh_rate - handled by display server */
+   gfx_ctx_drm_get_video_output_size,
+   NULL, /* get_video_output_prev */
+   NULL, /* get_video_output_next */
+   NULL, /* get_metrics */
+   NULL,
+   NULL, /* update_title */
+   gfx_ctx_drm_check_window,
+   NULL, /* set_resize */
+   gfx_ctx_drm_has_focus,
+   gfx_ctx_drm_suppress_screensaver,
+   false, /* has_windowed */
+   gfx_ctx_drm_swap_buffers,
+   gfx_ctx_drm_input_driver,
+#ifdef HAVE_EGL
+   egl_get_proc_address,
+#else
+   NULL,
+#endif
+   NULL,
+   NULL,
+   NULL,
+   "kms",
+   gfx_ctx_drm_get_flags,
+   gfx_ctx_drm_set_flags,
+   gfx_ctx_drm_bind_hw_render,
+   NULL,
+   NULL,
+   gfx_ctx_drm_create_surface,
+   gfx_ctx_drm_destroy_surface
+};

@@ -1,0 +1,325 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2021 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2021 - Daniel De Matteis
+ *  Copyright (C) 2019-2021 - James Leaver
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#include <string/stdstring.h>
+
+#include "tasks_internal.h"
+#include "../msg_hash.h"
+
+#include "../menu/menu_driver.h"
+
+typedef struct menu_explore_init_handle
+{
+   explore_state_t *state;
+   explore_build_t *build;      /* the index, between steps */
+   char *directory_playlist;
+   char *directory_database;
+   unsigned generation;             /* stale-completion guard */
+} menu_explore_init_handle_t;
+
+/* Bumped whenever an in-flight initialisation is abandoned (menu
+ * teardown).  A completion carrying an older generation installs
+ * nothing: the menu it was built for is gone. */
+static unsigned menu_explore_init_generation;
+static retro_task_t *menu_explore_init_task;
+
+/*********************/
+/* Utility Functions */
+/*********************/
+
+static void free_menu_explore_init_handle(
+      menu_explore_init_handle_t *menu_explore)
+{
+   if (!menu_explore)
+      return;
+
+   if (menu_explore->build)
+   {
+      menu_explore_build_abort(menu_explore->build);
+      menu_explore->build = NULL;
+   }
+
+   if (menu_explore->directory_playlist)
+   {
+      free(menu_explore->directory_playlist);
+      menu_explore->directory_playlist = NULL;
+   }
+
+   if (menu_explore->directory_database)
+   {
+      free(menu_explore->directory_database);
+      menu_explore->directory_database = NULL;
+   }
+
+   if (menu_explore->state)
+   {
+      menu_explore_free_state(menu_explore->state);
+      free(menu_explore->state);
+      menu_explore->state = NULL;
+   }
+
+   free(menu_explore);
+   menu_explore = NULL;
+}
+
+static void cb_task_menu_explore_init(
+      retro_task_t *task, void *task_data,
+      void *user_data, const char *err)
+{
+   menu_explore_init_handle_t *menu_explore = NULL;
+   unsigned menu_type                       = 0;
+   struct menu_state *menu_st               = menu_state_get_ptr();
+
+   if (!task)
+      return;
+
+   if (!(menu_explore = (menu_explore_init_handle_t*)task->state))
+      return;
+
+   /* Only the task still owning the slot may clear it: a stale
+    * completion arriving after a newer initialisation was pushed
+    * must not drop the newer task's handle. */
+   if (menu_explore_init_task == task)
+      menu_explore_init_task = NULL;
+
+   /* A build that outlived the menu it was for: install nothing.
+    * The state stays on the handle and the task's own cleanup frees
+    * it.  This is what lets teardown abandon the task instead of
+    * blocking the main thread until it finishes - installing here
+    * would load icons through a torn-down video driver and
+    * repopulate a global that has just been freed. */
+   if (menu_explore->generation != menu_explore_init_generation)
+      return;
+
+   /* Assign global menu explore state object */
+   menu_explore_set_state(menu_explore->state);
+   menu_explore->state = NULL;
+
+   /* If the explore menu is currently displayed,
+    * it must be refreshed */
+   menu_entries_get_last_stack(NULL, NULL, &menu_type, NULL, NULL);
+
+   /* check if we are opening a saved view from the horizontal/tabs menu */
+   if (menu_type == MENU_SETTING_HORIZONTAL_MENU)
+   {
+      const menu_ctx_driver_t *driver_ctx = menu_st->driver_ctx;
+      if (driver_ctx->list_get_entry)
+      {
+         size_t selection = driver_ctx->list_get_selection ? driver_ctx->list_get_selection(menu_st->userdata) : 0;
+         size_t _len      = driver_ctx->list_get_size      ? driver_ctx->list_get_size(menu_st->userdata, MENU_LIST_TABS) : 0;
+         if (selection > 0 && _len > 0)
+         {
+            struct item_file *item        = NULL;
+            /* Label contains the path and path contains the label */
+            if ((item = (struct item_file*)driver_ctx->list_get_entry(menu_st->userdata, MENU_LIST_HORIZONTAL,
+                        (unsigned)(selection - (_len +1)))))
+               menu_type = item->type;
+         }
+      }
+   }
+
+   if (menu_type == MENU_EXPLORE_TAB)
+      menu_st->flags            |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH
+                                 |  MENU_ST_FLAG_PREVENT_POPULATE;
+}
+
+static void task_menu_explore_init_free(retro_task_t *task)
+{
+   menu_explore_init_handle_t *menu_explore = NULL;
+
+   if (!task)
+      return;
+
+   menu_explore = (menu_explore_init_handle_t*)task->state;
+
+   free_menu_explore_init_handle(menu_explore);
+}
+
+/*******************************/
+/* Explore Menu Initialisation */
+/*******************************/
+
+static bool task_menu_explore_within_budget(void *ud)
+{
+   return task_nbio_slice_within_budget(ud, 0, 0);
+}
+
+/* Builds the index in steps under the shared per-frame I/O window:
+ * a playlist parsed, entries indexed, RDB items taken and categories
+ * sorted a bounded amount per check, so the frame loop keeps drawing
+ * while a large collection is indexed with Threaded Tasks off. */
+static void task_menu_explore_init_handler(retro_task_t *task)
+{
+   menu_explore_init_handle_t *menu_explore = NULL;
+   nbio_budget_t b;
+   int r;
+
+   if (!task)
+      return;
+   if (!(menu_explore = (menu_explore_init_handle_t*)task->state))
+   {
+      task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+      return;
+   }
+   if ((task_get_flags(task) & RETRO_TASK_FLG_CANCELLED) > 0)
+   {
+      if (menu_explore->build)
+         menu_explore_build_abort(menu_explore->build);
+      menu_explore->build = NULL;
+      task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+      return;
+   }
+
+   if (!menu_explore->build)
+   {
+      menu_explore->build = menu_explore_build_begin(
+            menu_explore->directory_playlist,
+            menu_explore->directory_database);
+      if (!menu_explore->build)
+      {
+         task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+         return;
+      }
+   }
+
+   task_nbio_slice_open(&b);
+   r = menu_explore_build_step(menu_explore->build,
+         task_menu_explore_within_budget, &b);
+   task_nbio_slice_close(&b);
+
+   if (r == 0)
+      return;
+
+   menu_explore->state = (r > 0)
+      ? menu_explore_build_end(menu_explore->build) : NULL;
+   if (r < 0)
+      menu_explore_build_abort(menu_explore->build);
+   menu_explore->build = NULL;
+   task_set_progress(task, 100);
+   task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+}
+
+static bool task_menu_explore_init_finder(retro_task_t *task, void *user_data)
+{
+   return (task && task->handler == task_menu_explore_init_handler);
+}
+
+bool task_push_menu_explore_init(const char *directory_playlist,
+      const char *directory_database)
+{
+   task_finder_data_t find_data;
+   retro_task_t *task                       = NULL;
+   menu_explore_init_handle_t *menu_explore = NULL;
+
+   if (   (!directory_playlist || !*directory_playlist)
+       || (!directory_database || !*directory_database))
+      goto error;
+
+   task         = task_init();
+   menu_explore = (menu_explore_init_handle_t*)calloc(1,
+         sizeof(menu_explore_init_handle_t));
+
+   if (!task || !menu_explore)
+      goto error;
+
+   /* Explore menu is singular - cannot perform
+    * multiple initialisations simultaneously */
+   find_data.func     = task_menu_explore_init_finder;
+   find_data.userdata = NULL;
+
+   if (task_queue_find(&find_data))
+      goto error;
+
+   /* Configure handle */
+   menu_explore->state              = NULL;
+   menu_explore->directory_playlist = strdup(directory_playlist);
+   menu_explore->directory_database = strdup(directory_database);
+   menu_explore->generation         = menu_explore_init_generation;
+
+   /* Configure task
+    * > Note: This is a silent task, with no user
+    *   notification messages */
+   task->handler  = task_menu_explore_init_handler;
+   task->state    = menu_explore;
+   /* Muted, so never shown: it names the task to the slow-handler
+    * watchdog. */
+   task->title    = strdup(msg_hash_to_str(
+         MENU_ENUM_LABEL_VALUE_EXPLORE_INITIALISING_LIST));
+   task->progress = 0;
+   task->callback = cb_task_menu_explore_init;
+   task->cleanup  = task_menu_explore_init_free;
+   task->flags   |= RETRO_TASK_FLG_MUTE;
+
+   menu_explore_init_task = task;
+
+   task_queue_push(task);
+
+   return true;
+
+error:
+
+   if (task)
+   {
+      free(task);
+      task = NULL;
+   }
+
+   free_menu_explore_init_handle(menu_explore);
+   menu_explore = NULL;
+
+   return false;
+}
+
+bool menu_explore_init_in_progress(void *data)
+{
+   task_finder_data_t find_data;
+
+   find_data.func     = task_menu_explore_init_finder;
+   find_data.userdata = NULL;
+
+   if (task_queue_find(&find_data))
+      return true;
+
+   return false;
+}
+
+/* Abandon any in-flight explore initialisation.
+ *
+ * Replaces waiting for it: the handler builds into the task's own
+ * handle and touches no menu state (menu_explore_build_list neither
+ * reads the global explore state nor loads icons - that happens in
+ * the callback, on the main thread), so nothing needs the worker to
+ * have stopped before the menu is freed.  The generation bump makes
+ * a completion already in flight install nothing. */
+void menu_explore_cancel_init_task(void)
+{
+   menu_explore_init_generation++;
+
+   if (menu_explore_init_task)
+   {
+      /* Thread-safe under the threaded queue; the handler notices on
+       * its next invocation and finishes, and the task's own cleanup
+       * releases the partially built state. */
+      task_set_flags(menu_explore_init_task, RETRO_TASK_FLG_CANCELLED, true);
+      menu_explore_init_task = NULL;
+   }
+}

@@ -1,0 +1,558 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2016 - Daniel De Matteis
+ *  Copyright (C) 2016-2019 - Brad Parker
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdlib.h>
+
+#include <retro_miscellaneous.h>
+#include <string/stdstring.h>
+#include <dpmi.h>
+#include <pc.h>
+
+#ifdef HAVE_CONFIG_H
+#include "../../config.h"
+#endif
+
+#ifdef HAVE_MENU
+#include "../../menu/menu_driver.h"
+#endif
+
+#include "../font_driver.h"
+
+#include "../../driver.h"
+#include "../../verbosity.h"
+
+#define VGA_WIDTH 320
+#define VGA_HEIGHT 200
+
+typedef struct vga
+{
+   unsigned char *vga_menu_frame;
+   unsigned char *vga_frame;
+
+   unsigned vga_menu_width;
+   unsigned vga_menu_height;
+   unsigned vga_menu_pitch;
+   unsigned vga_menu_bits;
+   unsigned vga_frame_width;
+   unsigned vga_frame_height;
+   unsigned vga_frame_pitch;
+   unsigned vga_frame_bits;
+
+   bool color;
+   bool vga_rgb32;
+} vga_t;
+
+typedef struct
+{
+   const font_renderer_driver_t *font_driver;
+   void *font_data;
+   vga_t *vga;
+} vga_raster_t;
+
+static void *vga_font_init(void *data,
+      const char *font_path, float font_size,
+      bool is_threaded)
+{
+   vga_raster_t *font  = (vga_raster_t*)calloc(1, sizeof(*font));
+
+   if (!font)
+      return NULL;
+
+   font->vga = (vga_t*)data;
+
+   font_size = 1;
+
+   if (!font_renderer_create_default(
+            &font->font_driver,
+            &font->font_data, font_path, font_size, FONT_ATLAS_FORMAT_A8))
+   {
+      free(font);
+      return NULL;
+   }
+
+   return font;
+}
+
+static void vga_font_render_free(void *data, bool is_threaded)
+{
+  vga_raster_t *font  = (vga_raster_t*)data;
+
+  if (!font)
+     return;
+
+  if (font->font_driver && font->font_data)
+     font->font_driver->free(font->font_data);
+
+  free(font);
+}
+
+static int vga_font_get_message_width(void *data, const char *msg,
+      size_t msg_len, float scale) { return 0; }
+static const struct font_glyph *vga_font_get_glyph(
+      void *data, uint32_t code) { return NULL; }
+/* TODO/FIXME -implement font rendering */
+static void vga_font_render_msg(
+      void *userdata,
+      void *data, const char *msg, size_t msg_len,
+      const struct font_params *params) { }
+
+/*
+ * VIDEO DRIVER
+ */
+
+static void vga_set_mode_13h(void)
+{
+  __dpmi_regs r = {0};
+
+   r.x.ax = 0x13;
+   __dpmi_int(0x10, &r);
+}
+
+static void vga_return_to_text_mode(void)
+{
+   __dpmi_regs r = {0};
+
+   r.x.ax = 3;
+   __dpmi_int(0x10, &r);
+}
+
+static void vga_upload_palette(void)
+{
+   unsigned i;
+   unsigned char r = 0;
+   unsigned char g = 0;
+   unsigned char b = 0;
+
+   outp(0x03c8, 0);
+
+   /* RGB332 */
+   for (i = 0; i < 256; i++)
+   {
+      if (i > 0 && i % 64 == 0)
+      {
+         r = 0;
+         g = 0;
+         b++;
+      }
+      else if (i > 0 && i % 8 == 0)
+      {
+         r = 0;
+         g++;
+      }
+
+      outp(0x03c9, r * (63.0f / 7.0f));
+      outp(0x03c9, g * (63.0f / 7.0f));
+      outp(0x03c9, b * (63.0f / 3.0f));
+
+      r++;
+   }
+}
+
+static void vga_vsync(void)
+{
+   /* wait until any previous retrace has ended */
+   do
+   {
+   }while (inportb(0x3da) & 8);
+
+   /* wait until a new retrace has just begun */
+   do
+   {
+   }while (!(inportb(0x3da) & 8));
+}
+
+static void vga_gfx_create(void)
+{
+   vga_set_mode_13h();
+   vga_upload_palette();
+}
+
+static void *vga_gfx_init(const video_info_t *video)
+{
+   vga_t *vga          = (vga_t*)calloc(1, sizeof(*vga));
+
+
+   vga->vga_frame_width    = VIDEO_SCALE_W(video->dims);
+   vga->vga_frame_height   = VIDEO_SCALE_H(video->dims);
+   vga->vga_rgb32          = video->rgb32;
+
+   if (video->rgb32)
+   {
+      vga->vga_frame_pitch = VIDEO_SCALE_W(video->dims) * 4;
+      vga->vga_frame_bits  = 32;
+   }
+   else
+   {
+      vga->vga_frame_pitch = VIDEO_SCALE_W(video->dims) * 2;
+      vga->vga_frame_bits  = 16;
+   }
+
+   vga->vga_frame          = (unsigned char*)malloc(VGA_WIDTH * VGA_HEIGHT);
+
+   vga_gfx_create();
+
+
+   return vga;
+}
+
+static bool vga_gfx_frame(void *data, const void *frame,
+      unsigned dims, uint64_t frame_count,
+      unsigned pitch, const char *msg, video_frame_info_t *video_info)
+{
+   unsigned frame_width = VIDEO_SCALE_W(dims);
+   unsigned frame_height = VIDEO_SCALE_H(dims);
+   unsigned width, height, bits;
+   const void *frame_to_copy = frame;
+   bool draw                 = true;
+   vga_t *vga                = (vga_t*)data;
+#ifdef HAVE_MENU
+   bool menu_is_alive        = (video_info->menu_st_flags & MENU_ST_FLAG_ALIVE) ? true : false;
+#endif
+
+   if (!frame || !frame_width || !frame_height)
+      return true;
+
+#ifdef HAVE_MENU
+   menu_driver_frame(menu_is_alive, video_info);
+#endif
+
+   if (     (vga->vga_frame_width  != frame_width)
+         || (vga->vga_frame_height != frame_height)
+         || (vga->vga_frame_pitch  != pitch))
+   {
+      if (frame_width > 4 && frame_height > 4)
+      {
+         vga->vga_frame_width = frame_width;
+         vga->vga_frame_height = frame_height;
+         vga->vga_frame_pitch = pitch;
+      }
+   }
+
+#ifdef HAVE_MENU
+   if (vga->vga_menu_frame && menu_is_alive)
+   {
+      frame_to_copy = vga->vga_menu_frame;
+      width         = vga->vga_menu_width;
+      height        = vga->vga_menu_height;
+      pitch         = vga->vga_menu_pitch;
+      bits          = vga->vga_menu_bits;
+   }
+   else
+#endif
+   {
+      width         = vga->vga_frame_width;
+      height        = vga->vga_frame_height;
+      pitch         = vga->vga_frame_pitch;
+      bits          = vga->vga_frame_bits;
+
+      if (frame_width == 4 && frame_height == 4 && (frame_width < width && frame_height < height))
+         draw = false;
+
+#ifdef HAVE_MENU
+      if (menu_is_alive)
+         draw = false;
+#endif
+   }
+
+   if (draw)
+   {
+      vga_vsync();
+
+      if (frame_to_copy == vga->vga_menu_frame)
+         dosmemput(frame_to_copy,
+               VGA_WIDTH*VGA_HEIGHT, 0xA0000);
+      else
+      {
+         if (bits == 32)
+         {
+            unsigned x, y;
+            for (y = 0; y < VGA_HEIGHT; y++)
+            {
+               for (x = 0; x < VGA_WIDTH; x++)
+               {
+                  /* scale incoming frame to fit the screen */
+                  unsigned    scaled_x = (width * x) / VGA_WIDTH;
+                  unsigned    scaled_y = (height * y) / VGA_HEIGHT;
+                  /* Rows are pitch bytes apart, not width pixels. */
+                  uint32_t pixel = ((const uint32_t*)
+                        ((const unsigned char*)frame_to_copy
+                         + pitch * scaled_y))[scaled_x];
+
+                  /* convert RGB888 to BGR332 */
+                  unsigned r = ((pixel & 0xFF0000) >> 21);
+                  unsigned g = ((pixel & 0x00FF00) >> 13);
+                  unsigned b = ((pixel & 0x0000FF) >> 6);
+
+                  vga->vga_frame[VGA_WIDTH * y + x] = (b << 6) | (g << 3) | r;
+               }
+            }
+
+            dosmemput(vga->vga_frame, VGA_WIDTH*VGA_HEIGHT, 0xA0000);
+         }
+         else if (bits == 16)
+         {
+            unsigned x, y;
+
+            for (y = 0; y < VGA_HEIGHT; y++)
+            {
+               for (x = 0; x < VGA_WIDTH; x++)
+               {
+                  /* scale incoming frame to fit the screen */
+                  unsigned    scaled_x = (width * x) / VGA_WIDTH;
+                  unsigned    scaled_y = (height * y) / VGA_HEIGHT;
+                  /* Rows are pitch bytes apart, not width pixels. */
+                  unsigned short pixel = ((const unsigned short*)
+                        ((const unsigned char*)frame_to_copy
+                         + pitch * scaled_y))[scaled_x];
+
+                  /* convert RGB565 to BGR332 */
+                  unsigned r = ((pixel & 0xF800) >> 13);
+                  unsigned g = ((pixel & 0x07E0) >> 8);
+                  unsigned b = ((pixel & 0x001F) >> 3);
+
+                  vga->vga_frame[VGA_WIDTH * y + x] = (b << 6) | (g << 3) | r;
+               }
+            }
+
+            dosmemput(vga->vga_frame, VGA_WIDTH*VGA_HEIGHT, 0xA0000);
+         }
+      }
+   }
+
+   if (msg)
+      font_driver_render_msg(data, msg, strlen(msg), NULL, NULL);
+
+   return true;
+}
+
+static void vga_gfx_set_nonblock_state(void *a, bool b, bool c, unsigned d) { }
+
+
+static bool vga_gfx_alive(void *data)
+{
+   /* Publish the actual VGA framebuffer dimensions as the output
+    * size, not the core's frame size.  video_driver_set_output_dims
+    * feeds the value used by menu drivers, the CRT switcher and the
+    * input subsystem to size their output and absolute-coordinate
+    * ranges; passing the core's frame dimensions would lie to all
+    * of them.  The VGA framebuffer is statically VGA_WIDTH x
+    * VGA_HEIGHT (320x200 mode 13h); the core's frame is scaled
+    * into that fixed-size framebuffer per-pixel in vga_gfx_frame. */
+   (void)data;
+   video_driver_set_output_dims(VIDEO_SCALE_PACK(VGA_WIDTH, VGA_HEIGHT));
+   return true;
+}
+
+static bool vga_gfx_focus(void *data)
+{
+   (void)data;
+   return true;
+}
+
+static bool vga_gfx_suppress_screensaver(void *data, bool enable)
+{
+   (void)data;
+   (void)enable;
+   return false;
+}
+
+static void vga_gfx_free(void *data)
+{
+   vga_t *vga = (vga_t*)data;
+
+   if (!vga)
+      return;
+
+   if (vga->vga_frame)
+      free(vga->vga_frame);
+   vga->vga_frame = NULL;
+
+   if (vga->vga_menu_frame)
+      free(vga->vga_menu_frame);
+   vga->vga_menu_frame = NULL;
+
+   vga_return_to_text_mode();
+}
+
+static bool vga_gfx_set_shader(void *data,
+      enum rarch_shader_type type, const char *path)
+{
+   (void)data;
+   (void)type;
+   (void)path;
+
+   return false;
+}
+
+static void vga_set_texture_frame(void *data,
+      const void *frame, bool rgb32, unsigned dims,
+      float alpha)
+{
+   vga_t     *vga = (vga_t*)data;
+   unsigned pitch = VIDEO_SCALE_W(dims) * (rgb32 ? 4 : 2);
+
+   if (!frame || !VIDEO_SCALE_W(dims) || !VIDEO_SCALE_H(dims) || !pitch)
+      return;
+
+   /* vga_menu_frame is always VGA_WIDTH*VGA_HEIGHT regardless of the
+    * incoming source frame size — the source is downscaled into this
+    * fixed-size buffer below.  Allocate once on first call and reuse
+    * thereafter; the original free+malloc per call was pure churn on
+    * a buffer whose size never changes. */
+   if (!vga->vga_menu_frame)
+   {
+      unsigned char *tmp = (unsigned char*)malloc(VGA_WIDTH * VGA_HEIGHT);
+      if (!tmp)
+         return;                        /* keep previous frame intact (NULL) */
+      vga->vga_menu_frame = tmp;
+   }
+
+   {
+      unsigned x, y;
+
+      if (!rgb32)
+      {
+         unsigned short *video_frame = (unsigned short*)frame;
+
+         for (y = 0; y < VGA_HEIGHT; y++)
+         {
+            for (x = 0; x < VGA_WIDTH; x++)
+            {
+               /* scale incoming frame to fit the screen */
+               unsigned scaled_x    = (VIDEO_SCALE_W(dims) * x) / VGA_WIDTH;
+               unsigned scaled_y    = (VIDEO_SCALE_H(dims) * y) / VGA_HEIGHT;
+               unsigned short pixel = video_frame[VIDEO_SCALE_W(dims) * scaled_y + scaled_x];
+               unsigned r           = ((pixel & 0xF000) >> 13);
+               unsigned g           = ((pixel & 0xF00) >> 9);
+               unsigned b           = ((pixel & 0xF0) >> 6);
+               vga->vga_menu_frame[VGA_WIDTH * y + x] = (b << 6) | (g << 3) | r;
+            }
+         }
+      }
+      else
+      {
+         const uint32_t *video_frame = (const uint32_t*)frame;
+
+         for (y = 0; y < VGA_HEIGHT; y++)
+         {
+            for (x = 0; x < VGA_WIDTH; x++)
+            {
+               /* scale incoming frame to fit the screen */
+               unsigned scaled_x    = (VIDEO_SCALE_W(dims) * x) / VGA_WIDTH;
+               unsigned scaled_y    = (VIDEO_SCALE_H(dims) * y) / VGA_HEIGHT;
+               uint32_t pixel       = video_frame[VIDEO_SCALE_W(dims) * scaled_y + scaled_x];
+               /* ARGB8888 to BGR332, as the core frame path does */
+               unsigned r           = ((pixel & 0xFF0000) >> 21);
+               unsigned g           = ((pixel & 0x00FF00) >> 13);
+               unsigned b           = ((pixel & 0x0000FF) >> 6);
+               vga->vga_menu_frame[VGA_WIDTH * y + x] = (b << 6) | (g << 3) | r;
+            }
+         }
+      }
+
+      vga->vga_menu_width  = VIDEO_SCALE_W(dims);
+      vga->vga_menu_height = VIDEO_SCALE_H(dims);
+      vga->vga_menu_pitch  = pitch;
+      vga->vga_menu_bits   = rgb32 ? 32 : 16;
+   }
+}
+
+static uint32_t vga_get_flags(void *data) { return 0; }
+
+static const video_poke_interface_t vga_poke_interface = {
+   vga_get_flags,
+   NULL, /* load_texture */
+   NULL, /* unload_texture */
+   NULL, /* set_video_mode */
+   NULL, /* get_refresh_rate */
+   NULL, /* set_filtering */
+   NULL, /* get_video_output_size */
+   NULL, /* get_video_output_prev */
+   NULL, /* get_video_output_next */
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
+   NULL, /* set_aspect_ratio */
+   NULL, /* apply_state_changes */
+   vga_set_texture_frame,
+   NULL, /* set_texture_enable */
+   font_driver_render_msg,
+   NULL, /* show_mouse */
+   NULL, /* grab_mouse_toggle */
+   NULL, /* get_current_shader */
+   NULL, /* get_current_software_framebuffer */
+   NULL, /* get_hw_render_interface */
+   NULL, /* set_hdr_menu_nits */
+   NULL, /* set_hdr_paper_white_nits */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
+};
+
+static void vga_gfx_get_poke_interface(void *data,
+      const video_poke_interface_t **iface) { *iface = &vga_poke_interface; }
+void vga_gfx_set_viewport(void *data, unsigned dims,
+      bool force_full, bool allow_rotate) { }
+
+static void vga_gfx_viewport_info(void *data, struct video_viewport *vp)
+{
+
+   vp->pos = VIDEO_POS_PACK(0, 0);
+
+   vp->dims   = vp->full_dims   = VIDEO_SCALE_PACK(VGA_WIDTH, VGA_HEIGHT);
+}
+
+static font_renderer_t vga_font = {
+   vga_font_init,
+   vga_font_render_free,
+   vga_font_render_msg,
+   "vga",
+   vga_font_get_glyph,         /* get_glyph */
+   NULL,                       /* bind_block */
+   NULL,                       /* flush */
+   vga_font_get_message_width, /* get_message_width */
+   NULL                        /* get_line_metrics */
+};
+
+video_driver_t video_vga = {
+   vga_gfx_init,
+   vga_gfx_frame,
+   vga_gfx_set_nonblock_state,
+   vga_gfx_alive,
+   vga_gfx_focus,
+   vga_gfx_suppress_screensaver,
+   NULL, /* has_windowed */
+   vga_gfx_set_shader,
+   vga_gfx_free,
+   "vga",
+   vga_gfx_set_viewport,
+   NULL, /* set_rotation */
+   vga_gfx_viewport_info,
+   NULL, /* read_viewport */
+#ifdef HAVE_OVERLAY
+   NULL, /* get_overlay_interface */
+#endif
+   vga_gfx_get_poke_interface,
+   NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
+#ifdef HAVE_GFX_WIDGETS
+   NULL  /* gfx_widgets_enabled */,
+#endif
+   NULL, /* invalidate_hw_render_cache */
+   NULL, /* read_viewport_hdr */
+   &vga_font
+};

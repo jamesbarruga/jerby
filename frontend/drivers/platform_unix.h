@@ -1,0 +1,600 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *  Copyright (C) 2012-2015 - Michael Lelli
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef _PLATFORM_UNIX_H
+#define _PLATFORM_UNIX_H
+
+#include <stdint.h>
+
+#include <boolean.h>
+#include <retro_miscellaneous.h>
+
+#include "../../config.def.h"
+
+#ifndef MAX_AXIS
+#define MAX_AXIS 10
+#endif
+
+#ifdef ANDROID
+#include <jni.h>
+#include <poll.h>
+#include <sched.h>
+/* struct android_app below is sized by DEFAULT_MAX_PADS; include its
+ * home rather than rely on whoever included this header first. */
+#include "../../input/input_driver.h"
+
+#include <android/looper.h>
+#include <android/configuration.h>
+#include <android/native_activity.h>
+#include <android/window.h>
+#include <android/sensor.h>
+
+#include <rthreads/rthreads.h>
+#include <retro_atomic.h>
+#include <retro_spsc.h>
+#include <rthreads/retro_eventcount.h>
+#include <stddef.h>
+
+#include "android_lifecycle.h"
+#include "../../input/drivers/android_input_ring.h"
+#include "../../input/drivers/android_focus.h"
+
+/* struct android_app below embeds retro_atomic_int_t, which is
+ * atomic_int under C and std::atomic<int> under C++. If this header were
+ * ever pulled into a C++ translation unit the struct layout would differ
+ * between that TU and the C ones, silently. Nothing includes it from C++
+ * today (griffin.c pulls platform_unix.c and android_input.c into a C
+ * TU); fail the build rather than let that change go unnoticed. */
+#if defined(__cplusplus)
+#error "platform_unix.h is C-only under ANDROID: struct android_app carries retro_atomic_int_t, whose layout differs between C and C++."
+#endif
+
+#include "../../config.def.h"
+
+bool test_permissions(const char *path);
+
+char internal_storage_path[PATH_MAX_LENGTH];
+char internal_storage_app_path[PATH_MAX_LENGTH];
+
+struct android_app;
+
+#define ANDROID_DISPLAY_OWN      (1 << 0)
+#define ANDROID_DISPLAY_VALID    (1 << 1)
+#define ANDROID_DISPLAY_ON       (1 << 2)
+#define ANDROID_DISPLAY_PRIVATE  (1 << 3)
+#define ANDROID_DISPLAY_PHYSICAL (1 << 4)
+
+/* Fingers tracked on each display */
+#define MAX_TOUCH 16
+
+/* The joystick axes native input reads: X, Y, Z, RZ, HAT_X, HAT_Y,
+ * LTRIGGER, RTRIGGER, BRAKE, GAS */
+#define ANDROID_JOYSTICK_AXES 10
+
+/* What native input reads of a key or a joystick move, from the input
+ * queue or from the second display's window */
+typedef struct android_input_fields
+{
+   int64_t event_time; /* ns, AKeyEvent_getEventTime()'s clock */
+   int32_t type;       /* AINPUT_EVENT_TYPE_KEY or _MOTION */
+   int32_t device_id;
+   int32_t source;
+   int32_t action;
+   int32_t keycode;
+   int32_t flags;
+   int32_t meta_state;
+   float axes[ANDROID_JOYSTICK_AXES]; /* a move's */
+} android_input_fields_t;
+
+/* A finger, a mouse or a pen of a motion event */
+typedef struct android_input_pointer
+{
+   int32_t id;
+   float x;
+   float y;
+   /* its contact: the ellipse's axes in pixels, and its orientation in
+    * ten-thousandths of a radian (input/common/overlay_contact.h) */
+   uint16_t major;
+   uint16_t minor;
+   int16_t angle;
+   int16_t pad;
+} android_input_pointer_t;
+
+/* An event from the input queue as the input reader wrote it into its
+ * ring (input/drivers/android_input_ring.h), and as long as it needs:
+ * a key ends before @fields.axes, a stick's move before @down_time,
+ * and a touch, a mouse or a pen has @pointer_count pointers, with
+ * what native input reads at the action's pointer. */
+typedef struct android_input_event
+{
+   android_input_rec_t rec;
+   android_input_fields_t fields;
+   int64_t down_time;
+   int32_t button_state;
+   int32_t tool_type;
+   int32_t pointer_count;
+   float pressure;
+   float distance;
+   float vscroll;
+   float relative_x;
+   float relative_y;
+   android_input_pointer_t pointer[MAX_TOUCH];
+} android_input_event_t;
+
+#define ANDROID_INPUT_KEY_BYTES \
+   offsetof(android_input_event_t, fields.axes)
+#define ANDROID_INPUT_STICK_BYTES \
+   offsetof(android_input_event_t, down_time)
+#define ANDROID_INPUT_MOTION_BYTES(pointers) \
+   (offsetof(android_input_event_t, pointer) \
+    + (size_t)(pointers) * sizeof(android_input_pointer_t))
+
+/* The input reader's ring, in bytes: some 1500 keys, or near 200 touches
+ * of all ten fingers. Full, the reader leaves the rest in the input
+ * queue until the app thread makes room. */
+#define ANDROID_INPUT_RING_BYTES 65536
+
+/* The input queue is read on a thread of its own
+ * (input/drivers/android_input.c): Android sends a window its next key
+ * only once the last is finished, so the queue is drained, and each
+ * event finished, as it comes, not once a frame */
+struct android_input_reader
+{
+   /* android_input_event_t records of their own sizes, reader thread
+    * to app thread (android_input_ring.h) */
+   retro_spsc_t events;
+   /* What the reader waits on while @events is full: room made, a
+    * queue handed over, or the stop */
+   retro_eventcount_t room;
+   sthread_t *thread;
+   /* The reader's looper, NULL until it runs */
+   retro_atomic_ptr_t looper;
+   /* App thread to reader: the queue to read, and how many times one
+    * was handed over */
+   retro_atomic_ptr_t queue;
+   retro_atomic_int_t queue_seq;
+   /* An input driver has started. Until one has, events are finished
+    * unread: nothing would take them. */
+   retro_atomic_int_t active;
+   retro_atomic_int_t quit;
+};
+
+/* The least number of keys and stick moves the second display's ring
+ * holds; a down or a move leaves room for this many ups */
+#define ANDROID_SECOND_INPUTS    512
+#define ANDROID_SECOND_INPUT_UPS 32
+
+/* A touch on the second display, UI thread to the input poll */
+typedef struct android_second_touch
+{
+   int32_t pointer_id;
+   int32_t x;          /* surface pixels */
+   int32_t y;
+   int32_t generation; /* nativeSurfaceChanged()'s, for the surface */
+   int32_t down;
+} android_second_touch_t;
+
+/* A surface the second display handed over; owns one ANativeWindow
+ * reference */
+struct android_second_surface
+{
+   ANativeWindow *window;
+   unsigned dims;       /* VIDEO_SCALE_PACK */
+   int generation;
+   int request;         /* the show request it was made for */
+};
+
+struct android_second_display
+{
+   /* android_second_touch_t records, UI thread to app thread */
+   retro_spsc_t touches;
+   /* android_input_fields_t records: the keys and stick moves its
+    * window received, UI thread to app thread */
+   retro_spsc_t inputs;
+   /* The newest surface not yet taken, struct android_second_surface *;
+    * the taker owns it. UI thread in, video thread out. */
+   retro_atomic_ptr_t surface;
+   /* UI thread: the last surface generation handed out, and the last
+    * one Java took back */
+   retro_atomic_int_t surface_generation;
+   retro_atomic_int_t surface_gone;
+   /* Video thread: what the renderer shows, for the input poll */
+   retro_atomic_int_t bound_surface;     /* surface generation, 0 none */
+   retro_atomic_int_t bound_window;      /* window id */
+   retro_atomic_int_t bound_generation;  /* window generation */
+   /* Video thread: the last request number sent to Java */
+   retro_atomic_int_t requests;
+   /* Video thread: a hide sent while no window held anything; the
+    * surfaces made for earlier requests are given up, 0 none */
+   retro_atomic_int_t released;
+};
+
+/* Request number @a was sent before @b; wrap-safe */
+#define ANDROID_SECOND_BEFORE(a, b) \
+   ((int)((unsigned)(a) - (unsigned)(b)) < 0)
+
+struct android_app
+{
+   /* The ANativeActivity object instance that this app is running in. */
+   ANativeActivity* activity;
+
+   /* The current configuration the app is running in. */
+   AConfiguration *config;
+
+   /* The last instance's saved state, as provided at creation time, or
+    * NULL if there was none. RetroArch never produces a saved state of
+    * its own - onSaveInstanceState() returns nothing - so this is only
+    * ever the create-time blob, held until it is freed on teardown.
+    */
+   void* savedState;
+   size_t savedStateSize;
+
+   /* The ALooper associated with the app's thread. */
+   ALooper* looper;
+
+   /* The window, the activity state the app thread has acknowledged,
+    * and every other answer a lifecycle callback on the UI thread
+    * waits for; see android_lifecycle.h. android_app_window() reads the
+    * window. */
+   android_lifecycle_t lc;
+
+   /* App thread only. */
+   int reinitRequested;
+
+   /* This is non-zero when the application's NativeActivity is being
+    * destroyed and waiting for the app thread to complete. */
+   int destroyRequested;
+
+   /* The command pipe: struct android_app_msg records, one per
+    * command, each written whole. */
+   int msgread;
+   int msgwrite;
+
+   /* The app thread's looper, for permissionsResolved() on the UI
+    * thread to wake. */
+   retro_atomic_ptr_t looper_to_wake;
+
+   sthread_t *thread;
+
+   /* UI thread only: the window last handed to the app thread, which
+    * a change of window has it give up first. */
+   ANativeWindow *posted_window;
+
+   /* UI thread only: the second display's window last handed over and
+    * its size, VIDEO_SCALE_PACK */
+   ANativeWindow *posted_second_window;
+   unsigned posted_second_dims;
+
+   /* Set by android_app_free() before it asks the app thread to shut
+    * down, so android_app_destroy() knows the activity is already being
+    * torn down by the framework and must not call finish() on it. */
+   int destroy_from_framework;
+
+   /*  Below are "private" implementation of RA code. */
+   /* Written by the app thread when the focus of its two windows
+    * changes (android_focus.h), read by the video thread in
+    * dispserv_android.c. */
+   retro_atomic_int_t unfocused;
+   /* App thread only */
+   android_focus_t focus;
+   unsigned accelerometer_event_rate;
+   unsigned gyroscope_event_rate;
+   ASensorManager *sensorManager;
+   ASensorEventQueue *sensorEventQueue;
+   const ASensor* accelerometerSensor;
+   const ASensor* gyroscopeSensor;
+   uint64_t sensor_state_mask;
+   unsigned detected_screen_rotation;
+   float    gravity_accum_x;
+   float    gravity_accum_y;
+   unsigned gravity_sample_count;
+   bool     gravity_calibrated;
+   char current_ime[NAME_MAX_LENGTH];
+   bool input_alive;
+   int16_t analog_state[DEFAULT_MAX_PADS][MAX_AXIS];
+   int8_t hat_state[DEFAULT_MAX_PADS][2];
+   jmethodID getIntent;
+   jmethodID onRetroArchExit;
+   jmethodID getStringExtra;
+   jmethodID clearPendingIntent;
+   jmethodID hasPendingIntent;
+   jmethodID getPendingIntentConfigPath;
+   jmethodID getPendingIntentLibretroPath;
+   jmethodID getPendingIntentFullPath;
+   jmethodID getPendingIntentIME;
+   jmethodID getPendingIntentStorageLocation;
+   jmethodID getPendingIntentDownloadsLocation;
+   jmethodID getPendingIntentScreenshotsLocation;
+   jmethodID isAndroidTV;
+   jmethodID getRefreshRate;
+   jmethodID getHdrMaxLuminance;
+   jmethodID getDisplayModes;
+   jmethodID getCurrentDisplayModeId;
+   jmethodID setDisplayModeId;
+   jmethodID getPowerstate;
+   jmethodID getBatteryLevel;
+   jmethodID setSustainedPerformanceMode;
+   jmethodID setWindowSettings;
+   jmethodID setScreenOrientation;
+   jmethodID getUserLanguageString;
+   jmethodID doVibrate;
+   jmethodID doVibrateJoypad;
+   jmethodID doVibrateUSB;
+   jmethodID doHapticFeedback;
+
+   jmethodID isPlayStoreBuild;
+   jmethodID isMetaQuestBuild;
+   jmethodID getAvailableCores;
+   jmethodID getInstalledCores;
+   jmethodID downloadCore;
+   jmethodID deleteCore;
+
+   jmethodID getVolumeCount;
+   jmethodID getVolumePath;
+   jmethodID inputGrabMouse;
+
+   jmethodID isScreenReaderEnabled;
+   jmethodID accessibilitySpeak;
+
+   jmethodID showKeyboard;
+   jmethodID hideKeyboard;
+   jmethodID setSecondDisplay;
+
+   /* Written by the Android UI thread in onContentRectChanged(), read by
+    * the video thread in the context drivers, with no lock on either
+    * side. @dims is the size as one VIDEO_SCALE_PACK word, so a reader
+    * never pairs one report's width with another's height. It is stored
+    * before @changed is raised, and the reader takes @changed with an
+    * exchange, so a change raised while it reads is not cleared unseen.
+    *
+    * The atomic type makes this struct C-only; see the __cplusplus
+    * guard at the top of the ANDROID block. */
+   struct
+   {
+      retro_atomic_int_t dims;
+      retro_atomic_int_t changed;
+   } content_rect;
+   struct android_second_display second_display;
+   struct android_input_reader input_reader;
+   uint16_t rumble_last_strength_strong[MAX_USERS];
+   uint16_t rumble_last_strength_weak[MAX_USERS];
+   uint16_t rumble_last_strength[MAX_USERS];
+   int id[MAX_USERS];
+
+   bool is_play_store_build;
+   bool is_meta_quest_build;
+
+#ifdef HAVE_SAF
+   jmethodID requestOpenDocumentTree;
+   jmethodID getPersistedSafTrees;
+   bool have_saf;
+#endif
+};
+
+enum
+{
+   LOOPER_ID_MAIN = 1,
+   LOOPER_ID_INPUT,
+   LOOPER_ID_USER,
+   LOOPER_ID_INPUT_MSG
+};
+
+enum
+{
+   APP_CMD_INPUT_CHANGED,
+   /**
+    * Command from main thread: a new ANativeWindow is ready for use.  Upon
+    * receiving this command, android_app->window will contain the new window
+    * surface.
+    */
+   APP_CMD_INIT_WINDOW,
+
+   /**
+    * Command from main thread: the existing ANativeWindow needs to be
+    * terminated.  Upon receiving this command, android_app->window still
+    * contains the existing window; after calling android_app_exec_cmd
+    * it will be set to NULL.
+    */
+   APP_CMD_TERM_WINDOW,
+
+   /**
+    * Command from main thread: the current ANativeWindow has been resized.
+    * Please redraw with its new size.
+    */
+   APP_CMD_WINDOW_RESIZED,
+
+   /**
+    * Command from main thread: the system needs that the current ANativeWindow
+    * be redrawn.  You should redraw the window before handing this to
+    * android_app_exec_cmd() in order to avoid transient drawing glitches.
+    */
+   APP_CMD_WINDOW_REDRAW_NEEDED,
+
+   /**
+    * Command from main thread: the content area of the window has changed,
+    * such as from the soft input window being shown or hidden.  You can
+    * find the new content rect in android_app::contentRect.
+    */
+   APP_CMD_CONTENT_RECT_CHANGED,
+
+   /**
+    * Command from main thread: the app's activity window has gained
+    * input focus.
+    */
+   APP_CMD_GAINED_FOCUS,
+
+   /**
+    * Command from main thread: the app's activity window has lost
+    * input focus.
+    */
+   APP_CMD_LOST_FOCUS,
+
+   /**
+    * Command from main thread: the current device configuration has changed.
+    */
+   APP_CMD_CONFIG_CHANGED,
+
+   /**
+    * Command from main thread: the system is running low on memory.
+    * Try to reduce your memory use.
+    */
+   APP_CMD_LOW_MEMORY,
+
+   /**
+    * Command from main thread: the app's activity has been started.
+    */
+   APP_CMD_START,
+
+   /**
+    * Command from main thread: the app's activity has been resumed.
+    */
+   APP_CMD_RESUME,
+
+   /**
+    * Unused. Upstream glue sends this to ask the app thread to produce a
+    * saved state; RetroArch has no such state, so onSaveInstanceState()
+    * returns without a round trip and nothing writes this command. Kept
+    * so the enumerators below retain their values.
+    */
+   APP_CMD_SAVE_STATE,
+
+   /**
+    * Command from main thread: the app's activity has been paused.
+    */
+   APP_CMD_PAUSE,
+
+   /**
+    * Command from main thread: the app's activity has been stopped.
+    */
+   APP_CMD_STOP,
+
+   /**
+    * Command from main thread: the app's activity is being destroyed,
+    * and waiting for the app thread to clean up and exit before proceeding.
+    */
+   APP_CMD_DESTROY,
+
+   APP_CMD_REINIT_DONE,
+
+   /**
+    * Command from the second display's controller, no ticket: its
+    * surface or the display list changed, so the screens' windows get
+    * another try.
+    */
+   APP_CMD_SECOND_WINDOW_CHANGED,
+
+   /**
+    * Commands from the second display's controller, no ticket: its
+    * window gained focus, or lost it or went.
+    */
+   APP_CMD_SECOND_GAINED_FOCUS,
+   APP_CMD_SECOND_LOST_FOCUS
+};
+
+/* The JNI exception guard and call wrappers live in
+ * libretro-common now, shared by every JNI user in the tree. */
+#include <jni/rjni.h>
+extern JNIEnv *jni_thread_getenv(void);
+
+/* Re-assert a chosen display mode and window frame rate after a new
+ * ANativeWindow appears.  Both are window state and are lost when the
+ * app goes to the background; without this a mode chosen by the user
+ * silently reverts on the next resume. */
+void android_display_server_reapply_mode(void);
+
+/* Performs the background save of SRAM, core options and config requested
+ * by APP_CMD_PAUSE/APP_CMD_STOP, if one is outstanding, then acknowledges
+ * the command. Called from the runloop, which is the nearest point outside
+ * the core: the command that requests it is read by the input driver's
+ * poll, and a core reaches that poll from inside retro_run(). No-op when
+ * nothing is pending. */
+void android_input_flush_pending_state(void);
+
+/* Dispatches an outstanding keypress haptic. Called from the runloop for
+ * the same reason as the flush above, and only from there: entering Java
+ * is only safe on the OS stack. No-op when nothing is pending. */
+void android_input_flush_pending_haptics(void);
+
+/* App thread: the input reader, started before the first command is
+ * read and stopped at teardown. False if it could not be started. */
+bool android_input_reader_start(struct android_app *android_app);
+void android_input_reader_stop(struct android_app *android_app);
+
+/* One command through the pipe. 'arg' is the window or input queue
+ * that APP_CMD_INIT_WINDOW and APP_CMD_INPUT_CHANGED hand over, NULL
+ * otherwise. Under PIPE_BUF, so a write is never split. */
+struct android_app_msg
+{
+   void *arg;
+   int8_t cmd;
+};
+
+bool android_app_write_cmd(struct android_app *android_app, int8_t cmd);
+bool android_app_write_cmd_arg(struct android_app *android_app,
+      int8_t cmd, void *arg);
+
+/* The window the app thread has, or NULL. A user that needs it to stay
+ * for a while takes it with android_lifecycle_window_acquire(). */
+#define android_app_window(app) \
+   ((ANativeWindow*)android_lifecycle_window(&(app)->lc))
+
+#ifdef HAVE_ANDROID_LIFECYCLE_HOOKS
+/* Runs a named shell script from the app's private data directory, if one
+ * is present. Build with -DHAVE_ANDROID_LIFECYCLE_HOOKS to enable; see
+ * android_run_lifecycle_hook() for what the hooks may and may not do. */
+void android_run_lifecycle_hook(struct android_app *android_app,
+      const char *name);
+#endif
+
+extern struct android_app *g_android;
+
+/* Any native thread, never waits: asks Java to show the second display
+ * on display @ordinal of the last published list, or to hide it for 0.
+ * A hide @given_up comes from a caller that holds nothing of the
+ * display's surfaces: those made for earlier requests are dropped as
+ * they arrive. */
+void android_second_display_request(unsigned ordinal, bool given_up);
+
+/* Releases a surface's window and frees it. Any thread that owns it. */
+void android_second_surface_free(struct android_second_surface *node);
+
+void frontend_android_get_name(char *s, size_t len);
+
+void frontend_android_get_manufacturer_model(char *s, size_t len);
+
+void frontend_android_get_version(int32_t *major, int32_t *minor, int32_t *rel);
+
+void frontend_android_get_version_sdk(int32_t *sdk);
+
+bool is_screen_reader_enabled(void);
+
+/* Pushes the live values of the window-affecting settings to the
+ * activity, so the Java side never reads them from the config file. */
+void android_app_set_window_settings(bool notch_write_over,
+      bool auto_mouse_grab);
+
+#ifdef HAVE_SAF
+struct retro_vfs_authorized_locations;
+
+void android_show_saf_tree_picker(void);
+bool android_get_vfs_authorized_locations(
+      struct retro_vfs_authorized_locations *locations);
+#endif
+
+#endif
+
+#endif

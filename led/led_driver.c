@@ -1,0 +1,117 @@
+/*  RetroArch - A frontend for libretro.
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <string/stdstring.h>
+
+#include "led_driver.h"
+#include "led_defines.h"
+#include "../input/input_output_store.h"
+#include "../verbosity.h"
+
+static const led_driver_t *current_led_driver = NULL;
+
+/* A core's LED calls, held until the frame has run (see
+ * input/input_output_store.h). One slot per LED. */
+static output_store_t led_store;
+
+/* Every LED index led_driver_set_led() accepts has a slot. */
+typedef char led_store_fits[(MAX_LEDS <= OUTPUT_STORE_SLOTS) ? 1 : -1];
+
+static void null_led_init(void) { }
+static void null_led_free(void) { }
+static void null_led_set(int led, int state) { }
+
+static const led_driver_t null_led_driver = {
+   null_led_init,
+   null_led_free,
+   null_led_set,
+   "null"
+};
+
+void led_driver_init(const char *led_driver)
+{
+   const char *drivername = led_driver;
+
+   if (!drivername)
+      drivername          = (const char*)"null";
+
+   current_led_driver     = &null_led_driver;
+
+   /* Nothing stored is for this driver. */
+   output_store_drop(&led_store);
+
+#ifdef HAVE_OVERLAY
+   if (string_is_equal(drivername, "overlay"))
+      current_led_driver  = &overlay_led_driver;
+#endif
+
+#ifdef HAVE_RPILED
+   if (string_is_equal(drivername, "rpi"))
+      current_led_driver  = &rpi_led_driver;
+   if (string_is_equal(drivername, "sysled"))
+      current_led_driver  = &sys_led_driver;
+#endif
+
+#if (defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)) || defined(HAVE_X11)
+   if (string_is_equal(drivername, "keyboard"))
+      current_led_driver  = &keyboard_led_driver;
+#endif
+
+   (*current_led_driver->init)();
+
+   if (current_led_driver != &null_led_driver)
+      RARCH_LOG("[LED] Using driver: \"%s\".\n", current_led_driver->ident);
+}
+
+void led_driver_free(void)
+{
+   /* What the core last asked for is applied before the driver puts
+    * things back the way it found them. */
+   led_driver_flush();
+
+   if (current_led_driver)
+      (*current_led_driver->free)();
+   current_led_driver = NULL;
+}
+
+/* Used by RETRO_ENVIRONMENT_GET_LED_INTERFACE.
+ *
+ * The state is stored, not written: a core calls this from inside
+ * retro_run(), and each call used to be a driver write on the core's
+ * own stack - a sysfs open, write and close, an X11 round trip, an
+ * injected key press. led_driver_flush() writes the frame's last
+ * state once the core has run. */
+void led_driver_set_led(int led, int value)
+{
+   /* Every driver drops an index outside this range. */
+   if (led < 0 || led >= MAX_LEDS)
+      return;
+
+   output_store_post(&led_store, (unsigned)led, value != 0);
+}
+
+static void led_driver_write(unsigned led, int value, void *userdata)
+{
+   if (current_led_driver)
+      (*current_led_driver->set_led)((int)led, value);
+}
+
+/* Write what the core's LED calls left this frame: one driver call for
+ * each LED it set, with the last state. Main thread, with the core off
+ * the stack. */
+void led_driver_flush(void)
+{
+   if (output_store_pending(&led_store))
+      output_store_take(&led_store, led_driver_write, NULL);
+}

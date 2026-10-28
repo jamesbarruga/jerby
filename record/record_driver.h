@@ -1,0 +1,238 @@
+#ifndef _RECORD_DRIVER_H
+#define _RECORD_DRIVER_H
+
+#include <boolean.h>
+#include <retro_miscellaneous.h>
+
+#include <retro_inline.h>
+
+#include "../gfx/video_defines.h"   /* VIDEO_SCALE_PACK */
+
+enum ffemu_pix_format
+{
+   FFEMU_PIX_RGB565 = 0,
+   FFEMU_PIX_BGR24,
+   FFEMU_PIX_ARGB8888
+};
+
+enum streaming_mode
+{
+   STREAMING_MODE_TWITCH = 0,
+   STREAMING_MODE_YOUTUBE,
+   STREAMING_MODE_FACEBOOK,
+   STREAMING_MODE_KICK,
+   STREAMING_MODE_LOCAL,
+   STREAMING_MODE_CUSTOM
+};
+
+enum record_config_type
+{
+   RECORD_CONFIG_TYPE_RECORDING_CUSTOM = 0,
+   RECORD_CONFIG_TYPE_RECORDING_LOW_QUALITY,
+   RECORD_CONFIG_TYPE_RECORDING_MED_QUALITY,
+   RECORD_CONFIG_TYPE_RECORDING_HIGH_QUALITY,
+   RECORD_CONFIG_TYPE_RECORDING_LOSSLESS_QUALITY,
+   RECORD_CONFIG_TYPE_RECORDING_WEBM_FAST,
+   RECORD_CONFIG_TYPE_RECORDING_WEBM_HIGH_QUALITY,
+   RECORD_CONFIG_TYPE_RECORDING_GIF,
+   RECORD_CONFIG_TYPE_RECORDING_APNG,
+   RECORD_CONFIG_TYPE_STREAMING_CUSTOM,
+   RECORD_CONFIG_TYPE_STREAMING_LOW_QUALITY,
+   RECORD_CONFIG_TYPE_STREAMING_MED_QUALITY,
+   RECORD_CONFIG_TYPE_STREAMING_HIGH_QUALITY,
+   RECORD_CONFIG_TYPE_STREAMING_NETPLAY
+};
+
+/* Parameters passed to ffemu_new() */
+struct record_params
+{
+   /* Framerate per second of input video. */
+   double fps;
+   /* Sample rate of input audio. */
+   double samplerate;
+
+   /* Filename to dump to. */
+   const char *filename;
+
+   /* Path to config. Optional. */
+   const char *config;
+
+   const char *audio_resampler;
+
+   /* Desired output resolution, VIDEO_SCALE_PACK'd. */
+   unsigned out_dims;
+
+   /* Total size of framebuffer used in input, VIDEO_SCALE_PACK'd. */
+   unsigned fb_dims;
+
+   /* Audio channels. */
+   unsigned channels;
+
+   unsigned video_record_scale_factor;
+   unsigned video_stream_scale_factor;
+   unsigned video_record_threads;
+   unsigned streaming_mode;
+   /* Video queue depth in frames (driver clamps/defaults out-of-range). */
+   unsigned video_fifo_frames;
+   /* Quarter turns counter-clockwise to rotate incoming frames by.
+    * out_dims and aspect_ratio describe the rotated output, fb_dims
+    * the incoming frames. */
+   unsigned rotation;
+
+   /* Aspect ratio of input video. Parameters are passed to the muxer,
+    * the video itself is not scaled.
+    */
+   float aspect_ratio;
+
+   enum record_config_type preset;
+
+   /* Input pixel format. */
+   enum ffemu_pix_format pix_fmt;
+
+   bool video_gpu_record;
+   /* Drop frames when the encoder queue is full instead of blocking. */
+   bool allow_frame_drop;
+   /* Prefer a hardware H.264 encoder for the built-in presets. */
+   bool hw_encoder;
+   bool menu_source;
+};
+
+struct record_video_data
+{
+   const void *data;
+   /* Both axes in one word, VIDEO_SCALE_PACK's layout. */
+   unsigned dims;
+   int pitch;
+   bool is_dupe;
+};
+
+struct record_audio_data
+{
+   const void *data;
+   size_t frames;
+};
+
+typedef struct record_driver
+{
+   void *(*init)(const struct record_params *params);
+   void  (*free)(void *data);
+   bool  (*push_video)(void *data,
+         const struct record_video_data *video_data);
+   bool  (*push_audio)(void *data,
+         const struct record_audio_data *audio_data);
+   bool  (*finalize)(void *data);
+   const char *ident;
+} record_driver_t;
+
+
+/* A raw recording's output size and display aspect when the display
+ * shows the core's frames turned @rotation quarter turns. @out_dims
+ * holds the core's size, turned here, unless it is --size's
+ * (@user_dims), which is kept as given. @display_aspect is the
+ * viewport's, which is already the turned picture's; 0 lets the
+ * output size decide. */
+static INLINE void record_raw_geometry(unsigned *out_dims, float *aspect,
+      unsigned rotation, float display_aspect, bool user_dims)
+{
+   if ((rotation & 1) && !user_dims)
+      *out_dims = VIDEO_SCALE_PACK(VIDEO_SCALE_H(*out_dims),
+            VIDEO_SCALE_W(*out_dims));
+   *aspect      = (display_aspect > 0.0f)
+      ? display_aspect
+      : (float)VIDEO_SCALE_W(*out_dims) / VIDEO_SCALE_H(*out_dims);
+}
+
+struct recording
+{
+   const record_driver_t *driver;
+   void *data;
+
+   /* The viewport the GPU recording was opened at, both axes in one
+    * word - VIDEO_SCALE_PACK's layout, so a resize is one comparison
+    * against a freshly packed viewport rather than two. */
+   unsigned gpu_dims;
+   /* GPU recording reads through read_viewport_bgrx. */
+   bool gpu_bgrx;
+
+   /* --size's override of the recording's output size, same layout;
+    * zero when it was not given, which is one test instead of two. */
+   unsigned out_dims;
+   /* The speaker layout the recorder was opened with (an AUDIO_LAYOUT_
+    * mask): stereo, or the core's own wider layout when it had one at
+    * the start of the recording. Every push is brought to it. */
+   uint32_t layout;
+   unsigned channels;
+
+   char path[PATH_MAX_LENGTH];
+   char config[PATH_MAX_LENGTH];
+   char output_dir[DIR_MAX_LENGTH];
+   char config_dir[DIR_MAX_LENGTH];
+
+   bool enable;
+   bool streaming_enable;
+   bool use_output_dir;
+   bool start_pending;
+};
+
+typedef struct recording recording_state_t;
+
+/**
+ * config_get_record_driver_options:
+ *
+ * Get an enumerated list of all record driver names, separated by '|'.
+ *
+ * Returns: string listing of all record driver names, separated by '|'.
+ **/
+const char* config_get_record_driver_options(void);
+
+void recording_driver_update_streaming_url(void);
+
+bool recording_deinit(void);
+
+/**
+ * recording_init:
+ *
+ * Initializes recording.
+ *
+ * Returns: true (1) if successful, otherwise false (0).
+ **/
+bool recording_init(void);
+
+void streaming_set_state(bool state);
+
+recording_state_t *recording_state_get_ptr(void);
+
+extern const record_driver_t *record_drivers[];
+
+/* Common native GPU controller hooks. Keep one call at frame/runloop sites;
+ * platform backends own their worker and snapshot retirement. */
+RETRO_BEGIN_DECLS
+extern const record_driver_t record_nvenc;
+extern const record_driver_t record_metal;
+#if defined(HAVE_RECORD_MEDIACODEC) || defined(RECORD_MEDIACODEC_TEST)
+extern const record_driver_t record_mediacodec;
+#endif
+struct video_frame_info;
+void recording_gpu_frame_info(struct video_frame_info *info,bool capture);
+void recording_gpu_poll(void);
+void recording_start_frame(void);
+void recording_gpu_stop(void);
+bool recording_gpu_pending(void);
+bool recording_gpu_reset_pending(void);
+/* Main owner: coalesce reinit flags while native users retire. The existing
+ * GPU poll applies the reinit once, or drops it during content/quit teardown. */
+bool recording_gpu_defer_reinit(int flags);
+void recording_gpu_reinit_poll(void);
+bool recording_gpu_defer_start(const record_driver_t *driver);
+bool recording_gpu_cancel_start(void);
+RETRO_END_DECLS
+static INLINE bool recording_is_native_gpu(const record_driver_t *driver)
+{
+#if defined(HAVE_RECORD_MEDIACODEC) || defined(RECORD_MEDIACODEC_TEST)
+   if (driver == &record_mediacodec)
+      return true;
+#endif
+   return driver == &record_nvenc || driver == &record_metal;
+}
+
+#endif

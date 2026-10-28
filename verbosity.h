@@ -1,0 +1,282 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __RARCH_VERBOSITY_H
+#define __RARCH_VERBOSITY_H
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <boolean.h>
+#include <retro_common_api.h>
+#include <retro_inline.h>
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#ifdef ORBIS
+#include <debugnet.h>
+#endif
+
+RETRO_BEGIN_DECLS
+
+#define FILE_PATH_LOG_DBG   "[DEBUG]"
+#define FILE_PATH_LOG_INFO  "[INFO]"
+#define FILE_PATH_LOG_ERROR "[ERROR]"
+#define FILE_PATH_LOG_WARN  "[WARN]"
+
+bool verbosity_is_enabled(void);
+
+void verbosity_enable(void);
+
+void verbosity_disable(void);
+
+void verbosity_set_log_level(unsigned level);
+
+unsigned verbosity_get_log_level(void);
+
+bool *verbosity_get_ptr(void);
+
+void retro_main_log_file_deinit(void);
+
+void retro_main_log_file_init(const char *path, bool append);
+
+bool is_logging_to_file(void);
+
+#ifdef HAVE_MCP
+/* The last lines logged, kept for GET_LOG once armed: lines are
+ * numbered from 0 as they are logged, and @since is the first wanted.
+ * Writes what fits of them to @s, one per line, and returns its
+ * length; *@next is the number of the line after the last written,
+ * and *@first that of the first, later than @since when older lines
+ * were overwritten. */
+void verbosity_ring_arm(void);
+size_t verbosity_ring_read(size_t since, char *s, size_t len,
+      size_t *first, size_t *next);
+#endif
+
+#if defined(HAVE_LOGGER)
+
+void logger_init (void);
+void logger_shutdown (void);
+void logger_send (const char *__format,...);
+void logger_send_v(const char *__format, va_list args);
+
+/* The va_list spellings format the body first: debugNetPrintf is
+ * printf-style with no va_list variant (handing it (tag, fmt, vp)
+ * makes the tag the format string and passes a raw va_list as a
+ * value), and two logger_send calls interleave under concurrent
+ * writers. Bounded at 512; logger consoles have no heap detour. */
+#ifndef ORBIS
+/* prefix and the formatted line in one call, so the format may be a
+ * variable. */
+static INLINE void logger_send_prefixed(const char *prefix,
+      const char *fmt, ...)
+{
+   char line[512];
+   va_list ap;
+   va_start(ap, fmt);
+   vsnprintf(line, sizeof(line), fmt, ap);
+   va_end(ap);
+   logger_send("%s%s", prefix, line);
+}
+#endif
+
+#ifdef ORBIS
+#define RARCH_LOGGER_V_IMPL(level, tag, fmt, vp) do { \
+   char _rarch_log_line[512]; \
+   vsnprintf(_rarch_log_line, sizeof(_rarch_log_line), fmt, vp); \
+   debugNetPrintf(level, "%s %s", tag, _rarch_log_line); \
+} while (0)
+#else
+#define RARCH_LOGGER_V_IMPL(prefix, tag, fmt, vp) do { \
+   char _rarch_log_line[512]; \
+   vsnprintf(_rarch_log_line, sizeof(_rarch_log_line), fmt, vp); \
+   logger_send("%s%s %s", prefix, tag, _rarch_log_line); \
+} while (0)
+#endif
+
+#ifdef IS_SALAMANDER
+
+#ifdef ORBIS
+#define RARCH_DBG(...) do { \
+   debugNetPrintf(DEBUGNET_DEBUG, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG(...) do { \
+   debugNetPrintf(DEBUGNET_INFO, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_INFO, tag, fmt, vp)
+
+#define RARCH_ERR(...) do { \
+   debugNetPrintf(DEBUGNET_ERROR, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_ERR_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_ERROR, tag, fmt, vp)
+
+#define RARCH_WARN(...) do { \
+   debugNetPrintf(DEBUGNET_INFO, __VA_ARGS__); \
+} while (0)
+
+/* debugnet has no WARN level: INFO on both spellings, matching
+ * RARCH_WARN, instead of one INFO and one DEBUG. */
+#define RARCH_WARN_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_INFO, tag, fmt, vp)
+
+#define RARCH_LOG_OUTPUT(...) do { \
+   debugNetPrintf(DEBUGNET_INFO, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_OUTPUT_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_INFO, tag, fmt, vp)
+
+#else
+#define RARCH_DBG(...) do { \
+   logger_send_prefixed("RetroArch Salamander: ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG(...) do { \
+   logger_send_prefixed("RetroArch Salamander: ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("RetroArch Salamander: ", tag, fmt, vp)
+
+#define RARCH_LOG_OUTPUT(...) do { \
+   logger_send_prefixed("[OUTPUT] ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_OUTPUT_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("[OUTPUT] ", tag, fmt, vp)
+
+#define RARCH_ERR(...) do { \
+   logger_send_prefixed("[ERROR] ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_ERR_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("[ERROR] ", tag, fmt, vp)
+
+#define RARCH_WARN(...) do { \
+   logger_send_prefixed("[WARN] ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_WARN_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("[WARN] ", tag, fmt, vp)
+#endif
+#else /* IS_SALAMANDER */
+
+#ifdef ORBIS
+#define RARCH_DBG(...) do { \
+   debugNetPrintf(DEBUGNET_DEBUG, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG(...) do { \
+   debugNetPrintf(DEBUGNET_INFO, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_INFO, tag, fmt, vp)
+
+#define RARCH_ERR(...) do { \
+   debugNetPrintf(DEBUGNET_ERROR, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_ERR_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_ERROR, tag, fmt, vp)
+
+#define RARCH_WARN(...) do { \
+   debugNetPrintf(DEBUGNET_INFO, __VA_ARGS__); \
+} while (0)
+
+/* debugnet has no WARN level: INFO on both spellings, matching
+ * RARCH_WARN, instead of one INFO and one DEBUG. */
+#define RARCH_WARN_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_INFO, tag, fmt, vp)
+
+#define RARCH_LOG_OUTPUT(...) do { \
+   debugNetPrintf(DEBUGNET_INFO, __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_OUTPUT_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL(DEBUGNET_INFO, tag, fmt, vp)
+
+#else
+#define RARCH_DBG(...) do { \
+   logger_send(__VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG(...) do { \
+   logger_send(__VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("", tag, fmt, vp)
+
+#define RARCH_ERR(...) do { \
+   logger_send_prefixed("[ERROR] ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_ERR_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("[ERROR] ", tag, fmt, vp)
+
+#define RARCH_WARN(...) do { \
+   logger_send_prefixed("[WARN] ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_WARN_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("[WARN] ", tag, fmt, vp)
+
+#define RARCH_LOG_OUTPUT(...) do { \
+   logger_send_prefixed("[OUTPUT] ", __VA_ARGS__); \
+} while (0)
+
+#define RARCH_LOG_OUTPUT_V(tag, fmt, vp) \
+   RARCH_LOGGER_V_IMPL("[OUTPUT] ", tag, fmt, vp)
+#endif
+#endif
+#define RARCH_LOG_BUFFER(...) do { } while (0)
+
+#else /* HAVE_LOGGER */
+void RARCH_LOG_V(const char *tag, const char *fmt, va_list ap);
+void RARCH_DBG(const char *fmt, ...);
+void RARCH_LOG(const char *fmt, ...);
+void RARCH_LOG_BUFFER(uint8_t *buffer, size_t len);
+void RARCH_LOG_OUTPUT(const char *msg, ...);
+void RARCH_WARN(const char *fmt, ...);
+void RARCH_ERR(const char *fmt, ...);
+
+#define RARCH_LOG_OUTPUT_V RARCH_LOG_V
+#define RARCH_WARN_V RARCH_LOG_V
+#define RARCH_ERR_V RARCH_LOG_V
+#endif /* HAVE_LOGGER */
+
+void rarch_log_file_init(
+      bool log_to_file,
+      bool log_to_file_timestamp,
+      const char *log_dir);
+
+void rarch_log_file_deinit(void);
+
+size_t rarch_log_file_set_override(const char *path);
+
+
+RETRO_END_DECLS
+
+#endif

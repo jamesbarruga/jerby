@@ -1,0 +1,400 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <math.h>
+
+/* Win32/Vulkan context. */
+
+/* necessary for mingw32 multimon defines: */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0500 //_WIN32_WINNT_WIN2K
+#endif
+
+#include <tchar.h>
+#include <wchar.h>
+
+#include <string.h>
+#include <math.h>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <commdlg.h>
+
+#include <dynamic/dylib.h>
+#include <string/stdstring.h>
+#include <retro_timers.h>
+
+#ifdef HAVE_CONFIG_H
+#include "../../config.h"
+#endif
+
+#include "../../configuration.h"
+#include "../../driver.h"
+#include "../../dynamic.h"
+#include "../../retroarch.h"
+#include "../../verbosity.h"
+#include "../../frontend/frontend_driver.h"
+
+#include "../common/win32_common.h"
+
+#include "../common/vulkan_common.h"
+#ifndef __WINRT__
+#include "../common/win_vulkan_dxgi.h"
+#endif
+
+typedef struct gfx_ctx_w_vk_data
+{
+   void *empty;
+} gfx_ctx_w_vk_data_t;
+
+/* TODO/FIXME - static globals */
+gfx_ctx_vulkan_data_t win32_vk;
+int              win32_vk_interval = 0;
+
+/* FORWARD DECLARATIONS */
+void win32_get_video_size(void *data, unsigned *dims);
+
+static void gfx_ctx_w_vk_swap_interval(void *data, int interval)
+{
+   if (win32_vk_interval != interval)
+   {
+      win32_vk_interval = interval;
+      if (vulkan_has_swapchain(&win32_vk))
+         win32_vk.flags |= VK_DATA_FLAG_NEED_NEW_SWAPCHAIN;
+   }
+}
+
+static void gfx_ctx_w_vk_check_window(void *data, bool *quit,
+      bool *resize, unsigned *dims)
+{
+   settings_t *settings     = config_get_ptr();
+   float refresh_rate       = settings->floats.video_refresh_rate;
+
+   win32_check_window(NULL, quit, resize, dims);
+
+   if (win32_vk.flags & VK_DATA_FLAG_NEED_NEW_SWAPCHAIN)
+      *resize               = true;
+
+   /* Trigger video driver init when changing refresh rate
+    * in fullscreen while dimensions stay the same.
+    * Otherwise display refresh rate will not stay at the designated rate.
+    * All other change combinations work however:
+    *  - windowed works always
+    *  - fullscreen works when dimensions and rate changes
+    * Bigger than zero difference required in order to prevent
+    * constant reinit when adjusting rate option in 0.001 increments.
+    */
+   if (     (win32_vk.flags & VK_DATA_FLAG_FULLSCREEN)
+         && (g_win32_refresh_rate)
+         && (g_win32_refresh_rate  != refresh_rate)
+         && (fabsf(g_win32_refresh_rate - refresh_rate) > 0.1f)
+         && (g_win32_resize_width  == VIDEO_SCALE_W(*dims))
+         && (g_win32_resize_height == VIDEO_SCALE_H(*dims)))
+   {
+      /* Asked for, not done: with threaded video this runs on the
+       * video thread, and the restart takes the input driver down
+       * while the main thread polls it. Unthreaded, it runs inside the
+       * driver's own call. */
+      int reinit_flags = DRIVER_VIDEO_AND_INPUT_MASK;
+      g_win32_refresh_rate = settings->floats.video_refresh_rate;
+      command_event_later(CMD_EVENT_REINIT, &reinit_flags);
+   }
+}
+
+static bool gfx_ctx_w_vk_presentable(void *data)
+{
+   (void)data;
+   /* Minimised is asked of the window directly; the swapchain check
+    * covers the moment before it has been rebuilt. Not on WinRT, which
+    * has neither IsIconic nor an HWND - see the wgl context for the
+    * detail; the swapchain check below still applies there. */
+#ifndef __WINRT__
+   if (IsIconic(win32_get_window())
+         || (win32_vk.dxgi_presenter && !ra_vulkan_dxgi_presentable(
+               (ra_vulkan_dxgi_t *)win32_vk.dxgi_presenter)))
+      return false;
+#endif
+   return vulkan_has_swapchain(&win32_vk);
+}
+
+static void gfx_ctx_w_vk_swap_buffers(void *data)
+{
+   if (win32_vk.context.flags & VK_CTX_FLAG_HAS_ACQUIRED_SWAPCHAIN)
+   {
+      win32_vk.context.flags &= ~VK_CTX_FLAG_HAS_ACQUIRED_SWAPCHAIN;
+      /* No swapchain - the window is minimised or zero-sized, and the
+       * create is retried in vulkan_acquire_next_image() below, which
+       * throttles that path itself. Nothing to present and nothing to
+       * wait for here. */
+      if (vulkan_has_swapchain(&win32_vk))
+         vulkan_present(&win32_vk, win32_vk.context.current_swapchain_index);
+   }
+   vulkan_acquire_next_image(&win32_vk);
+}
+
+static bool gfx_ctx_w_vk_set_resize(void *data, unsigned dims)
+{
+   if (vulkan_create_swapchain(&win32_vk, dims, win32_vk_interval))
+   {
+      if (win32_vk.flags & VK_DATA_FLAG_CREATED_NEW_SWAPCHAIN)
+      {
+         vulkan_acquire_next_image(&win32_vk);
+         win32_vk.context.flags         |=  VK_CTX_FLAG_INVALID_SWAPCHAIN;
+      }
+      win32_vk.flags                    &= ~VK_DATA_FLAG_NEED_NEW_SWAPCHAIN;
+
+      return true;
+   }
+
+   RARCH_ERR("[Vulkan] Failed to update swapchain.\n");
+   return false;
+}
+
+static void gfx_ctx_w_vk_destroy(void *data)
+{
+   HWND            window  = win32_get_window();
+   gfx_ctx_w_vk_data_t *vk = (gfx_ctx_w_vk_data_t*)data;
+
+   vulkan_context_destroy(&win32_vk, win32_vk.vk_surface != VK_NULL_HANDLE);
+   if (win32_vk.context.queue_lock)
+      slock_free(win32_vk.context.queue_lock);
+   memset(&win32_vk, 0, sizeof(win32_vk));
+
+   /* left up for the driver that comes next, where it can be */
+   if (window && !win32_window_keep())
+   {
+      win32_monitor_from_window();
+      win32_destroy_window();
+   }
+
+   if (g_win32_flags & WIN32_CMN_FLAG_RESTORE_DESKTOP)
+   {
+      win32_monitor_get_info();
+      g_win32_flags &= ~WIN32_CMN_FLAG_RESTORE_DESKTOP;
+   }
+
+   if (vk)
+      free(vk);
+
+   g_win32_flags &= ~WIN32_CMN_FLAG_INITED;
+}
+
+static void *gfx_ctx_w_vk_init(void *video_driver)
+{
+   WNDCLASSEX wndclass     = {0};
+   gfx_ctx_w_vk_data_t *vk = (gfx_ctx_w_vk_data_t*)calloc(1, sizeof(*vk));
+   uint8_t win32_flags     = win32_get_flags();
+
+   if (!vk)
+      return NULL;
+
+   if (win32_flags & WIN32_CMN_FLAG_INITED)
+      gfx_ctx_w_vk_destroy(NULL);
+
+   win32_window_reset();
+   win32_monitor_init();
+
+   /* one window procedure for every video and input driver; the
+    * family says what creating the window sets up */
+   wndclass.lpfnWndProc = win32_window_proc;
+   win32_window_proc_setup(WIN32_WINDOW_VULKAN);
+   win32_window_tag_presentation(config_get_ptr()->bools.video_dxgi_present);
+   if (!win32_window_init(&wndclass, true, NULL))
+      goto error;
+
+   if (!vulkan_context_init(&win32_vk, VULKAN_WSI_WIN32))
+      goto error;
+
+   return vk;
+
+error:
+   if (vk)
+      free(vk);
+   return NULL;
+}
+
+static bool gfx_ctx_w_vk_set_video_mode(void *data,
+      unsigned dims,
+      bool fullscreen)
+{
+   if (win32_get_window() && win32_vk.vk_surface != VK_NULL_HANDLE)
+   {
+      settings_t *settings = config_get_ptr();
+      bool exclusive      = !settings->bools.video_windowed_fullscreen;
+      bool fullscreen_changed = fullscreen
+         != ((win32_vk.flags & VK_DATA_FLAG_FULLSCREEN) != 0);
+      bool recreate       = (exclusive && fullscreen_changed
+            && !win32_vk.context.swapchain_external)
+         || win32_vk.fse_acquired;
+      if (recreate && win32_vk.mailbox.swapchain != VK_NULL_HANDLE)
+         return false;
+      if (win32_vk.fse_acquired)
+      {
+         VkResult res;
+         if (!win32_vk.fse_release)
+            return false;
+         res = ((PFN_vkReleaseFullScreenExclusiveModeEXT)win32_vk.fse_release)(
+               win32_vk.context.device, win32_vk.swapchain);
+         if (res != VK_SUCCESS && res != VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
+            return false;
+         win32_vk.fse_acquired = false;
+      }
+      if (exclusive)
+      {
+         if (!win32_window_set_fullscreen_exclusive(dims, fullscreen))
+            return false;
+      }
+      else if (!win32_window_set_fullscreen(dims, fullscreen))
+         return false;
+      if (recreate)
+      {
+         win32_vk.context.flags |= VK_CTX_FLAG_INVALID_SWAPCHAIN;
+         win32_vk.flags |= VK_DATA_FLAG_NEED_NEW_SWAPCHAIN;
+      }
+      if (fullscreen)
+         win32_vk.flags |=  VK_DATA_FLAG_FULLSCREEN;
+      else
+         win32_vk.flags &= ~VK_DATA_FLAG_FULLSCREEN;
+      return true;
+   }
+
+   if (fullscreen)
+      win32_vk.flags |=  VK_DATA_FLAG_FULLSCREEN;
+   else
+      win32_vk.flags &= ~VK_DATA_FLAG_FULLSCREEN;
+
+   if (win32_set_video_mode(NULL, dims, fullscreen))
+   {
+      /* Create a new swapchain in order to prevent fullscreen
+       * emulated mailbox crash caused by refresh rate change */
+      vulkan_create_swapchain(&win32_vk, dims, win32_vk_interval);
+
+      gfx_ctx_w_vk_swap_interval(data, win32_vk_interval);
+      return true;
+   }
+
+   RARCH_ERR("[Vulkan] win32_set_video_mode failed.\n");
+   /* Do not destroy `data` here.  The caller in
+    * gfx/drivers/vulkan.c::vulkan_init treats a false return
+    * from set_video_mode as a failure of the in-flight `vk_t`
+    * construction and runs vulkan_free() on it, which calls
+    * ctx_driver->destroy(ctx_data) -- i.e. gfx_ctx_w_vk_destroy()
+    * -- on the very pointer we already freed.  Leave cleanup
+    * to the caller's single normal-path destroy.  Cocoa /
+    * Android already do this; this matches them. */
+   return false;
+}
+
+static void gfx_ctx_w_vk_input_driver(void *data,
+      const char *joypad_name)
+{
+   /* no input driver of this driver's own: the frontend starts the
+    * one that goes with a Windows window */
+   input_driver_video_window(INPUT_WINDOW_WINDOWS, NULL);
+}
+
+static enum gfx_ctx_api gfx_ctx_w_vk_get_api(void *data) { return GFX_CTX_VULKAN_API; }
+
+static bool gfx_ctx_w_vk_bind_api(void *data,
+      enum gfx_ctx_api api, unsigned major, unsigned minor) { return (api == GFX_CTX_VULKAN_API); }
+
+static void gfx_ctx_w_vk_bind_hw_render(void *data, bool enable) { }
+
+static void *gfx_ctx_w_vk_get_context_data(void *data) { return &win32_vk.context; }
+
+static uint32_t gfx_ctx_w_vk_get_flags(void *data)
+{
+   uint32_t flags             = 0;
+
+   /* What the swapchain settled when it was made, rather than a walk of
+    * present_modes while the thread that draws rewrites it */
+   if (retro_atomic_load_acquire_int(
+            &win32_vk.context.supports_adaptive_vsync))
+      BIT32_SET(flags, GFX_CTX_FLAGS_ADAPTIVE_VSYNC);
+
+   /* A borderless fullscreen toggle restyles the window it has; the
+    * driver sees a resize (win32_window_set_fullscreen()). It was held
+    * back while a swapchain rebuilt at another size ended in a lost
+    * device with HDR on; that was the HDR off-screen buffers keeping
+    * the old size (vulkan_hdr_buffers_init()), and with that fixed the
+    * toggle has been seen to hold on the setup that showed it.
+    * RETROARCH_FULLSCREEN_IN_PLACE=0 in the environment turns it off,
+    * so that a toggle restarts the drivers as it used to, should it
+    * need telling apart from something else. */
+   if (win32_fullscreen_in_place())
+   {
+      BIT32_SET(flags, GFX_CTX_FLAGS_FULLSCREEN_IN_PLACE);
+      BIT32_SET(flags, GFX_CTX_FLAGS_WINDOW_RESIZE_IN_PLACE);
+      if (win32_vk.mailbox.swapchain == VK_NULL_HANDLE)
+         BIT32_SET(flags, GFX_CTX_FLAGS_FULLSCREEN_EXCLUSIVE_IN_PLACE);
+   }
+
+#if defined(HAVE_SLANG) && (defined(HAVE_SPIRV_CROSS) || defined(HAVE_RSLC))
+   BIT32_SET(flags, GFX_CTX_FLAGS_SHADERS_SLANG);
+#endif
+
+   return flags;
+}
+
+static void gfx_ctx_w_vk_set_flags(void *data, uint32_t flags) { }
+
+/* The compositor's vertical blank: on current Windows a Vulkan swapchain
+ * presents through DXGI under DWM, so this is the same signal the D3D
+ * drivers read from their swapchain, and it does not need the ICD to
+ * expose display timing - which NVIDIA's Windows driver does not. */
+static retro_time_t gfx_ctx_w_vk_last_present_time(void *data)
+{
+   (void)data;
+   return win32_dwm_last_vblank_time();
+}
+
+const gfx_ctx_driver_t gfx_ctx_w_vk = {
+   gfx_ctx_w_vk_init,
+   gfx_ctx_w_vk_destroy,
+   gfx_ctx_w_vk_get_api,
+   gfx_ctx_w_vk_bind_api,
+   gfx_ctx_w_vk_swap_interval,
+   gfx_ctx_w_vk_set_video_mode,
+   win32_get_video_size,
+   NULL, /* refresh_rate - handled by display server */
+   NULL, /* video_output_size - handled by display server */
+   NULL, /* get_video_output_prev - handled by display server */
+   NULL, /* get_video_output_next - handled by display server */
+   NULL, /* metrics - handled by display server */
+   NULL,
+   video_driver_update_title,
+   gfx_ctx_w_vk_check_window,
+   gfx_ctx_w_vk_set_resize,
+   win32_has_focus,
+   win32_suspend_screensaver,
+   true,                            /* has_windowed */
+   gfx_ctx_w_vk_swap_buffers,
+   gfx_ctx_w_vk_input_driver,
+   NULL,
+   NULL,
+   NULL,
+   win32_show_cursor,
+   "vk_w",
+   gfx_ctx_w_vk_get_flags,
+   gfx_ctx_w_vk_set_flags,
+   gfx_ctx_w_vk_bind_hw_render,
+   gfx_ctx_w_vk_get_context_data,
+   NULL,                            /* make_current */
+   NULL,                            /* create_surface */
+   NULL                             /* destroy_surface */,
+   gfx_ctx_w_vk_presentable,
+   gfx_ctx_w_vk_last_present_time
+};

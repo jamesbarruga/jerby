@@ -1,0 +1,269 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2016-2017 - Hans-Kristian Arntzen
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <compat/strl.h>
+#include <string/stdstring.h>
+#include <retro_timers.h>
+
+#ifdef HAVE_CONFIG_H
+#include "../../config.h"
+#endif
+
+#include "../../frontend/frontend_driver.h"
+#include "../common/vulkan_common.h"
+#include "../../verbosity.h"
+#include "../../configuration.h"
+
+typedef struct
+{
+   gfx_ctx_vulkan_data_t vk;
+   int swap_interval;
+   unsigned dims;                /* VIDEO_SCALE_PACK */
+   unsigned refresh_rate_x1000;
+} khr_display_ctx_data_t;
+
+static void gfx_ctx_khr_display_destroy(void *data)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+   if (!khr)
+      return;
+
+   vulkan_context_destroy(&khr->vk, true);
+#ifdef HAVE_THREADS
+   if (khr->vk.context.queue_lock)
+      slock_free(khr->vk.context.queue_lock);
+#endif
+   free(khr);
+}
+
+static void gfx_ctx_khr_display_get_video_size(void *data,
+      unsigned *dims)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+   *dims = khr->dims;
+}
+
+static float gfx_ctx_khr_display_get_refresh_rate(void *data)
+{
+   float refresh_rate          = 0.0f;
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+
+   if (khr)
+      refresh_rate = khr->refresh_rate_x1000 / 1000.0f;
+
+   return refresh_rate;
+}
+
+
+static void *gfx_ctx_khr_display_init(void *video_driver)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)
+      calloc(1, sizeof(*khr));
+   if (!khr)
+       return NULL;
+
+   if (!vulkan_context_init(&khr->vk, VULKAN_WSI_DISPLAY))
+   {
+      RARCH_ERR("[Vulkan] Failed to create Vulkan context.\n");
+      goto error;
+   }
+
+   frontend_driver_install_signal_handler();
+
+   return khr;
+
+error:
+   gfx_ctx_khr_display_destroy(khr);
+   return NULL;
+}
+
+static void gfx_ctx_khr_display_check_window(void *data, bool *quit,
+      bool *resize, unsigned *dims)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+   *resize                     = (khr->vk.flags & VK_DATA_FLAG_NEED_NEW_SWAPCHAIN) ? true : false;
+
+   if (khr->dims != *dims)
+   {
+      *dims                   = khr->dims;
+      *resize                  = true;
+   }
+
+   if ((bool)frontend_driver_get_signal_handler_state())
+      *quit                    = true;
+}
+
+static bool gfx_ctx_khr_display_set_resize(void *data, unsigned dims)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+
+   khr->dims                   = dims;
+
+   if (!vulkan_create_swapchain(&khr->vk, dims, khr->swap_interval))
+   {
+      RARCH_ERR("[Vulkan] Failed to update swapchain.\n");
+      return false;
+   }
+
+   if (khr->vk.flags & VK_DATA_FLAG_CREATED_NEW_SWAPCHAIN)
+   {
+      vulkan_acquire_next_image(&khr->vk);
+      khr->vk.context.flags   |=  VK_CTX_FLAG_INVALID_SWAPCHAIN;
+   }
+   khr->vk.flags              &= ~VK_DATA_FLAG_NEED_NEW_SWAPCHAIN;
+   return true;
+}
+
+static bool gfx_ctx_khr_display_set_video_mode(void *data,
+      unsigned dims,
+      bool fullscreen)
+{
+   struct vulkan_display_surface_info info;
+   khr_display_ctx_data_t *khr    = (khr_display_ctx_data_t*)data;
+   settings_t *settings           = config_get_ptr();
+   unsigned video_monitor_index   = settings->uints.video_monitor_index;
+   unsigned refresh_rate_x1000    = settings->floats.video_refresh_rate * 1000;
+
+   /* Windowed asks for no particular mode: the largest one. */
+   info.dims                      = fullscreen ? dims : 0;
+   info.monitor_index             = video_monitor_index;
+   info.refresh_rate_x1000        = refresh_rate_x1000;
+
+   if (!vulkan_surface_create(&khr->vk, VULKAN_WSI_DISPLAY, &info, NULL,
+            0, khr->swap_interval))
+   {
+      RARCH_ERR("[Vulkan] Failed to create KHR_display surface.\n");
+      gfx_ctx_khr_display_destroy(data);
+      return false;
+   }
+
+   khr->dims                      = khr->vk.context.swapchain_dims;
+   khr->refresh_rate_x1000        = info.refresh_rate_x1000;
+
+   return true;
+}
+
+static void gfx_ctx_khr_display_input_driver(void *data,
+      const char *joypad_name)
+{
+   /* no input driver of this context's own: the frontend starts the
+    * one that goes with a display that has no window system */
+   input_driver_video_window(INPUT_WINDOW_KMS, NULL);
+}
+
+static enum gfx_ctx_api gfx_ctx_khr_display_get_api(void *data)
+{
+   return GFX_CTX_VULKAN_API;
+}
+
+static bool gfx_ctx_khr_display_bind_api(void *data,
+      enum gfx_ctx_api api, unsigned major, unsigned minor)
+{
+   return (api == GFX_CTX_VULKAN_API);
+}
+
+static void gfx_ctx_khr_display_set_flags(void *data, uint32_t flags) { }
+static bool gfx_ctx_khr_display_has_focus(void *data) { return true; }
+static bool gfx_ctx_khr_display_suppress_screensaver(void *data, bool enable) { return false; }
+static gfx_ctx_proc_t gfx_ctx_khr_display_get_proc_address(const char *symbol) { return NULL; }
+
+static void gfx_ctx_khr_display_set_swap_interval(void *data,
+      int swap_interval)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+
+   if (khr->swap_interval != swap_interval)
+   {
+      khr->swap_interval = swap_interval;
+      if (khr->vk.swapchain)
+         khr->vk.flags  |= VK_DATA_FLAG_NEED_NEW_SWAPCHAIN;
+   }
+}
+
+static bool gfx_ctx_khr_display_presentable(void *data)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+   return khr && khr->vk.swapchain != VK_NULL_HANDLE;
+}
+
+static void gfx_ctx_khr_display_swap_buffers(void *data)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+   if (khr->vk.context.flags & VK_CTX_FLAG_HAS_ACQUIRED_SWAPCHAIN)
+   {
+      khr->vk.context.flags &= ~VK_CTX_FLAG_HAS_ACQUIRED_SWAPCHAIN;
+      /* No swapchain - the window is minimised or zero-sized, and
+       * the create is retried in vulkan_acquire_next_image() below,
+       * which throttles that path itself. Nothing to present and
+       * nothing to wait for here. */
+      if (khr->vk.swapchain != VK_NULL_HANDLE)
+         vulkan_present(&khr->vk, khr->vk.context.current_swapchain_index);
+   }
+   vulkan_acquire_next_image(&khr->vk);
+}
+
+static uint32_t gfx_ctx_khr_display_get_flags(void *data)
+{
+   uint32_t flags = 0;
+
+#if defined(HAVE_SLANG) && (defined(HAVE_SPIRV_CROSS) || defined(HAVE_RSLC))
+   BIT32_SET(flags, GFX_CTX_FLAGS_SHADERS_SLANG);
+#endif
+
+   return flags;
+}
+
+static void *gfx_ctx_khr_display_get_context_data(void *data)
+{
+   khr_display_ctx_data_t *khr = (khr_display_ctx_data_t*)data;
+   return &khr->vk.context;
+}
+
+const gfx_ctx_driver_t gfx_ctx_khr_display = {
+   gfx_ctx_khr_display_init,
+   gfx_ctx_khr_display_destroy,
+   gfx_ctx_khr_display_get_api,
+   gfx_ctx_khr_display_bind_api,
+   gfx_ctx_khr_display_set_swap_interval,
+   gfx_ctx_khr_display_set_video_mode,
+   gfx_ctx_khr_display_get_video_size,
+   gfx_ctx_khr_display_get_refresh_rate,
+   NULL,                                        /* get_video_output_size */
+   NULL,                                        /* get_video_output_prev */
+   NULL,                                        /* get_video_output_next */
+   NULL,                                        /* get_metrics */
+   NULL,
+   NULL,                                        /* update_title */
+   gfx_ctx_khr_display_check_window,
+   gfx_ctx_khr_display_set_resize,
+   gfx_ctx_khr_display_has_focus,
+   gfx_ctx_khr_display_suppress_screensaver,
+   false,                                       /* has_windowed */
+   gfx_ctx_khr_display_swap_buffers,
+   gfx_ctx_khr_display_input_driver,
+   gfx_ctx_khr_display_get_proc_address,
+   NULL,
+   NULL,
+   NULL,
+   "khr_display",
+   gfx_ctx_khr_display_get_flags,
+   gfx_ctx_khr_display_set_flags,
+   NULL,
+   gfx_ctx_khr_display_get_context_data,
+   NULL,                                        /* make_current */
+   NULL,                                        /* create_surface */
+   NULL                                         /* destroy_surface */,
+   gfx_ctx_khr_display_presentable
+};

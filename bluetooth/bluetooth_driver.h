@@ -1,0 +1,132 @@
+/*  RetroArch - A frontend for libretro.
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __BLUETOOTH_DRIVER__H
+#define __BLUETOOTH_DRIVER__H
+
+#include <stdint.h>
+
+#include <boolean.h>
+#include <retro_common_api.h>
+#include <lists/string_list.h>
+
+RETRO_BEGIN_DECLS
+
+enum rarch_bluetooth_ctl_state
+{
+   RARCH_BLUETOOTH_CTL_NONE = 0,
+   RARCH_BLUETOOTH_CTL_DESTROY,
+   RARCH_BLUETOOTH_CTL_DEINIT,
+   RARCH_BLUETOOTH_CTL_FIND_DRIVER,
+   RARCH_BLUETOOTH_CTL_INIT
+};
+
+typedef struct bluetooth_driver
+{
+   void *(*init)(void);
+
+   void (*free)(void *data);
+
+   /* A scan is two calls, BLUETOOTH_SCAN_WINDOW_US apart: begin
+    * starts discovery and returns, end stops it and reads what was
+    * found. Neither waits out the window; whoever drives the scan
+    * does, without holding a thread (the scan task reschedules
+    * itself). end is always called once after a begin. */
+   void (*scan_begin)(void *data);
+   void (*scan_end)(void *data);
+   void (*get_devices)(void *data, struct string_list *list);
+   bool (*device_is_connected)(void *data, unsigned i);
+   void (*device_get_sublabel)(void *data, char *s, unsigned i, size_t len);
+   bool (*connect_device)(void *data, unsigned i);
+   bool (*remove_device)(void *data, unsigned i);
+
+   const char *ident;
+
+   /* Whether a scan begun has found all it will before the window is
+    * out, so it can be ended early; NULL for a driver that cannot
+    * tell. */
+   bool (*scan_done)(void *data);
+
+   /* Whether the adapter is on its system's generic driver, which
+    * may find nothing; NULL for a driver that cannot tell. */
+   bool (*adapter_generic)(void *data);
+} bluetooth_driver_t;
+
+extern bluetooth_driver_t bluetooth_bluetoothctl;
+extern bluetooth_driver_t bluetooth_windows;
+extern bluetooth_driver_t bluetooth_bluez;
+
+struct bluetooth_hold;
+
+typedef struct
+{
+   const bluetooth_driver_t *drv;
+   void *data;
+   /* the driver started, as a scan holds it */
+   struct bluetooth_hold *hold;
+   bool active;
+} bluetooth_driver_state_t;
+
+/**
+ * config_get_bluetooth_driver_options:
+ *
+ * Get an enumerated list of all bluetooth driver names,
+ * separated by '|'.
+ *
+ * Returns: string listing of all bluetooth driver names,
+ * separated by '|'.
+ **/
+const char* config_get_bluetooth_driver_options(void);
+
+/* How long discovery runs between scan_begin and scan_end.
+ * Overridable for tests. */
+#ifndef BLUETOOTH_SCAN_WINDOW_US
+#define BLUETOOTH_SCAN_WINDOW_US 10000000
+#endif
+/* how often a scan looks whether the driver is done before that */
+#ifndef BLUETOOTH_SCAN_POLL_US
+#define BLUETOOTH_SCAN_POLL_US 100000
+#endif
+
+/* A scan's hold on the driver, taken on the frontend's thread before
+ * the scan starts and let go, on any thread, once it has ended: a
+ * driver stopped during a scan is freed when the scan is done with it,
+ * not under it. NULL with no driver, and the calls below then do
+ * nothing. */
+struct bluetooth_hold *driver_bluetooth_scan_hold(void);
+void driver_bluetooth_scan_release(struct bluetooth_hold *hold);
+void driver_bluetooth_scan_begin(struct bluetooth_hold *hold);
+void driver_bluetooth_scan_end(struct bluetooth_hold *hold);
+bool driver_bluetooth_scan_done(struct bluetooth_hold *hold);
+bool driver_bluetooth_adapter_generic(void);
+
+void driver_bluetooth_get_devices(struct string_list *list);
+
+bool driver_bluetooth_device_is_connected(unsigned i);
+
+void driver_bluetooth_device_get_sublabel(char *s, unsigned i, size_t len);
+
+bool driver_bluetooth_connect_device(unsigned i);
+
+bool driver_bluetooth_remove_device(unsigned i);
+
+bool bluetooth_driver_ctl(enum rarch_bluetooth_ctl_state state, void *data);
+
+bluetooth_driver_state_t *bluetooth_state_get_ptr(void);
+
+extern const bluetooth_driver_t *bluetooth_drivers[];
+
+RETRO_END_DECLS
+
+#endif

@@ -1,0 +1,10938 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2021 - Daniel De Matteis
+ *  Copyright (C) 2012-2015 - Michael Lelli
+ *  Copyright (C) 2014-2017 - Jean-Andr  Santoni
+ *  Copyright (C) 2016-2019 - Brad Parker
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifdef _WIN32
+#ifdef _XBOX
+#include <xtl.h>
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+#if defined(DEBUG) && defined(HAVE_DRMINGW)
+#include "exchndl.h"
+#endif
+#endif
+
+#if defined(DINGUX)
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
+#if (defined(__linux__) || defined(__unix__) || defined(DINGUX)) && !defined(__EMSCRIPTEN__)
+#include <signal.h>
+#endif
+
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+#include <objbase.h>
+#include <process.h>
+#endif
+
+#if defined(WEBOS)
+#include <sys/resource.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "input/common/wayland_common_webos.h"
+#endif
+
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <string.h>
+#include <ctype.h>
+#include <math.h>
+#include <locale.h>
+
+#include <boolean.h>
+#include <clamping.h>
+#include <string/stdstring.h>
+#include <dynamic/dylib.h>
+#include <file/config_file.h>
+#include <lists/string_list.h>
+#include <memalign.h>
+#include <retro_math.h>
+#include <retro_timers.h>
+#include <encodings/utf.h>
+#include <time/rtime.h>
+
+#include <libretro.h>
+#define VFS_FRONTEND
+#include <vfs/vfs_implementation.h>
+#ifdef HAVE_SMBCLIENT
+#include "libretro-common/vfs/vfs_implementation_smb.h"
+#endif
+#ifdef HAVE_NFSCLIENT
+#include "libretro-common/vfs/vfs_implementation_nfs.h"
+#endif
+
+#include <features/features_cpu.h>
+
+#include <compat/strl.h>
+#include <compat/strcasestr.h>
+#include <compat/getopt.h>
+#include <compat/posix_string.h>
+#include <file/file_path.h>
+#include <streams/rzip_stream.h>
+#include <retro_miscellaneous.h>
+#include <lists/dir_list.h>
+#ifdef __MACH__
+#include <TargetConditionals.h>
+#endif
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#include "frontend/drivers/platform_emscripten.h"
+#include "gfx/common/gl_common.h"
+#endif
+
+#ifdef HAVE_LIBNX
+#include <switch.h>
+#include "switch_performance_profiles.h"
+#endif
+
+#if defined(ANDROID)
+#include <android/api-level.h>
+#endif
+
+#ifdef HAVE_PRESENCE
+#include "network/presence.h"
+#endif
+#ifdef HAVE_DISCORD
+#include "network/discord.h"
+#endif
+
+#ifdef HAVE_MIST
+#include "steam/steam.h"
+#endif
+
+#include "config.def.h"
+
+#ifdef HAVE_MENU
+#include "menu/menu_driver.h"
+#endif
+
+#include "location_driver.h"
+
+#include "runloop.h"
+#include "camera/camera_driver.h"
+#include "location_driver.h"
+#include "record/record_driver.h"
+#include "record/record_driver.h"
+
+#ifdef HAVE_MICROPHONE
+#include "audio/microphone_driver.h"
+#endif
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#ifdef HAVE_NETWORKING
+#include <net/net_compat.h>
+#include <net/net_socket.h>
+#include <net/net_http.h>
+#ifdef HAVE_SSL
+#include <net/net_socket_ssl.h>
+#endif
+#endif
+
+#include <audio/audio_resampler.h>
+
+#include "audio/audio_driver.h"
+
+#include "gfx/gfx_display.h"
+
+#ifdef HAVE_GFX_WIDGETS
+#include "gfx/gfx_widgets.h"
+#endif
+
+#include "input/input_remapping.h"
+#include "input/drivers_hid/winusb_bind.h"
+#ifdef HAVE_OPENXR
+#include "input/common/input_openxr.h"
+#include "gfx/video_xr.h"
+#endif
+
+#ifdef HAVE_CHEEVOS
+#include "cheevos/cheevos.h"
+#include "cheevos/cheevos_menu.h"
+#endif
+
+#ifdef HAVE_TRANSLATE
+#include <encodings/base64.h>
+#include <formats/rbmp.h>
+#include <formats/rpng.h>
+#include <formats/rjson.h>
+#include "translation_defines.h"
+#endif
+
+#ifdef HAVE_NETWORKING
+#include "network/netplay/netplay.h"
+#include "network/netplay/netplay_private.h"
+#ifdef HAVE_WIFI
+#include "network/wifi_driver.h"
+#endif
+#ifdef HAVE_CLOUDSYNC
+#include "network/cloud_sync_driver.h"
+#endif
+#endif
+#ifdef HAVE_MCP
+#include "network/mcp_server.h"
+#endif
+
+#ifdef HAVE_THREADS
+#include <rthreads/rthreads.h>
+#endif
+
+#include "autosave.h"
+#include "config.features.h"
+#include "content.h"
+#include "core_info.h"
+#include "dynamic.h"
+#include "defaults.h"
+#include "driver.h"
+#include "msg_hash.h"
+#include "paths.h"
+#include "file_path_special.h"
+#include "ui/ui_companion_driver.h"
+#include "verbosity.h"
+
+#include "gfx/video_driver.h"
+#include "gfx/video_display_server.h"
+#ifdef HAVE_THREADS
+#include "gfx/video_thread_wrapper.h"
+#include "gfx/video_thread_hw.h"
+#include "frontend/thread_elevation.h"
+#endif
+#ifdef HAVE_BLUETOOTH
+#include "bluetooth/bluetooth_driver.h"
+#endif
+#include "misc/cpufreq/cpufreq.h"
+#include "led/led_driver.h"
+#include "midi_driver.h"
+#include "core.h"
+#include "configuration.h"
+#include "list_special.h"
+#ifdef HAVE_CHEATS
+#include "cheat_manager.h"
+#endif
+#include "tasks/task_content.h"
+#include "tasks/tasks_internal.h"
+
+#include "version.h"
+#include "version_git.h"
+
+#include "retroarch.h"
+#ifdef HAVE_FFMPEG
+#include "cores/internal_cores.h"
+#endif
+
+#include "accessibility.h"
+
+#ifdef HAVE_GAME_AI
+#include "ai/game_ai.h"
+#endif
+
+/* RetroArch provides its own entry point (main, below) and runloop,
+ * creates its own Win32 window (gfx/common/win32_common.c), and
+ * initialises SDL subsystems explicitly (SDL_Init/SDL_InitSubSystem
+ * in the SDL audio/video/input drivers). SDL is used purely as a
+ * driver backend, never as the application framework. Tell SDL not to
+ * #define main->SDL_main and not to supply its own WinMain: without
+ * this, SDL.h renames our main to SDL_main and the link pulls in
+ * libSDL2main's WinMain, which (a) is unwanted given -mwindows /
+ * -ENTRY:mainCRTStartup already designate our entry point, and (b)
+ * breaks under CXX_BUILD where the renamed main is compiled as C++
+ * and no longer matches the C 'SDL_main' that WinMain calls
+ * (undefined reference to SDL_main). */
+#if defined(HAVE_SDL3)
+#ifndef SDL_MAIN_HANDLED
+#define SDL_MAIN_HANDLED
+#endif
+#include <SDL3/SDL.h>
+#elif defined(HAVE_SDL) || defined(HAVE_SDL2) || defined(HAVE_SDL_DINGUX)
+#ifndef SDL_MAIN_HANDLED
+#define SDL_MAIN_HANDLED
+#endif
+#include "SDL.h"
+#endif
+
+#ifdef HAVE_LAKKA
+#include <retro_dirent.h>
+#include "lakka.h"
+#ifdef HAVE_LAKKA_SWITCH
+#include "misc/reboot2payload/reboot2payload.h"
+#endif
+#include <systemd/sd-daemon.h>
+#endif
+
+#define _PSUPP(var, name, desc) printf("  %s:\n\t\t%s: %s\n", name, desc, var ? "yes" : "no")
+
+#ifdef HAVE_LAKKA
+static bool lakka_update_staged = false;
+
+bool lakka_update_pending(void)
+{
+   return lakka_update_staged;
+}
+
+void lakka_update_check(void)
+{
+   bool         found = false;
+   struct RDIR *dir   = retro_opendir(LAKKA_UPDATE_DIR);
+
+   lakka_update_staged = false;
+   if (!dir)
+      return;
+
+   while (!found && retro_readdir(dir))
+   {
+      const char *name = retro_dirent_get_name(dir);
+
+      if (retro_dirent_is_dir(dir, NULL))
+         continue;
+
+      found =    string_ends_with(name, ".tar")
+              || string_ends_with(name, ".img.gz")
+              || string_ends_with(name, ".img");
+   }
+
+   retro_closedir(dir);
+   lakka_update_staged = found;
+}
+#endif
+
+#define FAIL_CPU(simd_type) do { \
+   RARCH_ERR(simd_type " code is compiled in, but CPU does not support this feature. Cannot continue.\n"); \
+   retroarch_fail(1, "validate_cpu_features()"); \
+} while (0)
+
+#define FFMPEG_RECORD_ARG "r:"
+
+#ifdef HAVE_DYNAMIC
+#define DYNAMIC_ARG "L:"
+#else
+#define DYNAMIC_ARG
+#endif
+
+#ifdef HAVE_NETWORKING
+#define NETPLAY_ARG "HC:F:"
+#else
+#define NETPLAY_ARG
+#endif
+
+#ifdef HAVE_CONFIGFILE
+#define CONFIG_FILE_ARG "c:"
+#else
+#define CONFIG_FILE_ARG
+#endif
+
+#ifdef HAVE_BSV_MOVIE
+#define BSV_MOVIE_ARG "P:R:M:"
+#else
+#define BSV_MOVIE_ARG
+#endif
+
+/* Griffin hack */
+#ifdef HAVE_QT
+#ifndef HAVE_MAIN
+#define HAVE_MAIN
+#endif
+#endif
+
+#define MIDI_DRIVER_BUF_SIZE 4096
+#define MIDI_DRIVER_OFF "OFF"
+
+/* Descriptive names for options without short variant.
+ *
+ * Please keep the name in sync with the option name.
+ * Order does not matter. */
+enum
+{
+   RA_OPT_MENU = 256, /* must be outside the range of a char */
+   RA_OPT_CHECK_FRAMES,
+   RA_OPT_PORT,
+   RA_OPT_SPECTATE,
+   RA_OPT_NICK,
+   RA_OPT_COMMAND,
+   RA_OPT_APPENDCONFIG,
+   RA_OPT_BPS,
+   RA_OPT_IPS,
+   RA_OPT_XDELTA,
+   RA_OPT_NO_PATCH,
+   RA_OPT_RECORDCONFIG,
+   RA_OPT_SUBSYSTEM,
+   RA_OPT_SIZE,
+   RA_OPT_FEATURES,
+   RA_OPT_VERSION,
+   RA_OPT_EOF_EXIT,
+   RA_OPT_LOG_FILE,
+   RA_OPT_MAX_FRAMES,
+   RA_OPT_MAX_FRAMES_SCREENSHOT,
+   RA_OPT_MAX_FRAMES_SCREENSHOT_PATH,
+   RA_OPT_SET_SHADER,
+   RA_OPT_DATABASE_SCAN,
+   RA_OPT_ACCESSIBILITY,
+   RA_OPT_LOAD_MENU_ON_ERROR,
+   RA_OPT_CLOUDSYNC,
+   RA_OPT_MCP_STDIO
+};
+
+/* DRIVERS */
+#ifdef HAVE_BLUETOOTH
+extern const bluetooth_driver_t *bluetooth_drivers[];
+#endif
+
+/* MAIN GLOBAL VARIABLES */
+struct rarch_state
+{
+   /* retroarch_fail() lands here while retroarch_main_init runs
+    * (RARCH_FLAGS_INIT_IN_PROGRESS) */
+   jmp_buf error_sjlj_context;
+
+   char *connect_host; /* Netplay hostname passed from CLI */
+   char *connect_mitm_id; /* Netplay MITM address from CLI */
+
+   struct retro_perf_counter *perf_counters_rarch[MAX_COUNTERS];
+
+   unsigned perf_ptr_rarch;
+   /* Laser Pointer's mode before its toggle turned it Off; 0 is Auto. */
+   unsigned laser_last;
+   uint32_t flags;
+
+   char error_string[NAME_MAX_LENGTH];
+   char launch_arguments[4096];
+   char path_default_shader_preset[PATH_MAX_LENGTH];
+   char path_content[PATH_MAX_LENGTH];
+   char path_libretro[PATH_MAX_LENGTH];
+   char path_libretro_last[PATH_MAX_LENGTH];
+   char path_config_file[PATH_MAX_LENGTH];
+   char path_config_default_file[PATH_MAX_LENGTH];
+   char path_config_append_file[PATH_MAX_LENGTH];
+   char path_config_override_file[PATH_MAX_LENGTH];
+   char path_core_options_file[PATH_MAX_LENGTH];
+   char dir_system[DIR_MAX_LENGTH];
+   char dir_savefile[DIR_MAX_LENGTH];
+   char dir_savestate[DIR_MAX_LENGTH];
+};
+
+/* Forward declarations */
+#ifdef HAVE_LIBNX
+void libnx_apply_overclock(void);
+#endif
+
+static struct rarch_state rarch_st;
+
+static access_state_t access_state_st     = {0};
+
+static void retro_frame_null(const void *data, unsigned width,
+      unsigned height, size_t pitch) { }
+void retro_input_poll_null(void) { }
+
+#ifdef HAVE_SMBCLIENT
+static struct smb_settings smb_global_cfg;
+
+void retroarch_smb_init(void)
+{
+   settings_t *settings = config_get_ptr();
+
+   smb_global_cfg.server_address = settings->arrays.smb_client_server_address;
+   smb_global_cfg.share = settings->arrays.smb_client_share;
+   smb_global_cfg.username = settings->arrays.smb_client_username;
+   smb_global_cfg.password = settings->arrays.smb_client_password;
+   smb_global_cfg.workgroup = settings->arrays.smb_client_workgroup;
+   smb_global_cfg.timeout = settings->uints.smb_client_timeout;
+   smb_global_cfg.readahead = settings->uints.smb_client_readahead;
+   smb_global_cfg.num_contexts = settings->uints.smb_client_num_contexts;
+   smb_global_cfg.auth_mode = settings->uints.smb_client_auth_mode;
+   smb_global_cfg.subdir = settings->arrays.smb_client_subdir;
+   smb_global_cfg.realm = settings->arrays.smb_client_realm;
+   smb_global_cfg.kdc = settings->arrays.smb_client_kdc;
+
+   smb_init_cfg(&smb_global_cfg);
+}
+#endif
+
+#ifdef HAVE_NFSCLIENT
+static struct nfs_settings nfs_global_cfg;
+
+/* Settings for nfs://; a URL with its own export needs none of them. */
+void retroarch_nfs_init(void)
+{
+   settings_t *settings = config_get_ptr();
+
+   nfs_global_cfg.server_address = settings->arrays.nfs_server;
+   nfs_global_cfg.export_path    = settings->arrays.nfs_export;
+   nfs_global_cfg.timeout        = settings->uints.nfs_timeout;
+   nfs_global_cfg.num_contexts   = settings->uints.nfs_num_contexts;
+   nfs_global_cfg.nfs_port       = settings->uints.nfs_port;
+   nfs_global_cfg.mount_port     = settings->uints.nfs_mount_port;
+   nfs_global_cfg.version        = settings->uints.nfs_version;
+   nfs_global_cfg.readahead      = settings->uints.nfs_readahead;
+
+   nfs_init_cfg(&nfs_global_cfg);
+}
+#endif
+
+static location_driver_t location_null = {
+   NULL,
+   NULL,
+   NULL,
+   NULL,
+   NULL,
+   NULL,
+   "null",
+};
+
+static const location_driver_t *location_drivers[] = {
+#ifdef ANDROID
+   &location_android,
+#endif
+#ifdef HAVE_CORELOCATION
+   &location_corelocation,
+#endif
+   &location_null,
+   NULL,
+};
+
+static location_driver_state_t location_driver_st     = {0};
+
+location_driver_state_t *location_state_get_ptr(void)
+{
+   return &location_driver_st;
+}
+
+const char *config_get_location_driver_options(void)
+{
+   return char_list_new_special(STRING_LIST_LOCATION_DRIVERS, NULL);
+}
+
+static void location_driver_find_driver(
+      const char *loc_drv,
+      location_driver_state_t *location_st,
+      const char *prefix,
+      bool verbosity_enabled)
+{
+   int i                        = (int)driver_find_index("location_driver", loc_drv);
+
+   if (i >= 0)
+      location_st->driver       = (const location_driver_t*)
+         location_drivers[i];
+   else
+   {
+      if (verbosity_enabled)
+      {
+         unsigned d;
+         RARCH_ERR("Couldn't find any %s named \"%s\"\n", prefix, loc_drv);
+         RARCH_LOG_OUTPUT("Available %ss are:\n", prefix);
+         for (d = 0; location_drivers[d]; d++)
+            RARCH_LOG_OUTPUT("\t%s\n", location_drivers[d]->ident);
+
+         RARCH_WARN("Going to default to first %s...\n", prefix);
+      }
+
+      location_st->driver = (const location_driver_t*)location_drivers[0];
+   }
+}
+
+bool driver_location_start(void)
+{
+   location_driver_state_t
+      *location_st              = &location_driver_st;
+   if (     location_st
+         && location_st->data
+         && location_st->driver
+         && location_st->driver->start)
+   {
+      settings_t *settings = config_get_ptr();
+      bool location_allow  = settings->bools.location_allow;
+      if (location_allow)
+         return location_st->driver->start(location_st->data);
+
+      /* TODO/FIXME - localize */
+      runloop_msg_queue_push(
+            "Location is explicitly disabled.\n",
+            STRLEN_CONST("Location is explicitly disabled.\n"),
+            1, 180, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT,
+            MESSAGE_QUEUE_CATEGORY_INFO);
+   }
+   return false;
+}
+
+void driver_location_stop(void)
+{
+   location_driver_state_t
+      *location_st              = &location_driver_st;
+   if (     location_st
+         && location_st->driver
+         && location_st->driver->stop
+         && location_st->data)
+      location_st->driver->stop(location_st->data);
+}
+
+void driver_location_set_interval(unsigned interval_msecs,
+      unsigned interval_distance)
+{
+   location_driver_state_t
+      *location_st              = &location_driver_st;
+   if (     location_st
+         && location_st->driver
+         && location_st->driver->set_interval
+         && location_st->data)
+      location_st->driver->set_interval(location_st->data,
+            interval_msecs, interval_distance);
+}
+
+bool driver_location_get_position(double *lat, double *lon,
+      double *horiz_accuracy, double *vert_accuracy)
+{
+   location_driver_state_t
+      *location_st              = &location_driver_st;
+   if (     location_st
+         && location_st->driver
+         && location_st->driver->get_position
+         && location_st->data)
+      return location_st->driver->get_position(location_st->data,
+            lat, lon, horiz_accuracy, vert_accuracy);
+
+   *lat            = 0.0;
+   *lon            = 0.0;
+   *horiz_accuracy = 0.0;
+   *vert_accuracy  = 0.0;
+   return false;
+}
+
+static bool init_location(
+      void *data,
+      location_driver_state_t *location_st,
+      const char *loc_drv,
+      bool verbosity_enabled)
+{
+   if (!location_st->driver || !location_st->driver->init)
+      return false;
+
+   /* Resource leaks will follow if location
+      interface is initialized twice. */
+   if (!location_st->data)
+   {
+      rarch_system_info_t *sys_info = (rarch_system_info_t*)data;
+      location_driver_find_driver(loc_drv, &location_driver_st,
+            "location driver", verbosity_enabled);
+
+      if (!(location_st->data = location_st->driver->init()))
+      {
+         RARCH_ERR("Failed to initialize location driver. Will continue without location.\n");
+         return false;
+      }
+
+      if (sys_info->location_cb.initialized)
+         sys_info->location_cb.initialized();
+   }
+
+   return true;
+}
+
+static void uninit_location(void *data, location_driver_state_t *location_st)
+{
+   if (location_st->data && location_st->driver)
+   {
+      rarch_system_info_t *sys_info = (rarch_system_info_t*)data;
+      if (sys_info->location_cb.deinitialized)
+         sys_info->location_cb.deinitialized();
+
+      if (location_st->driver->free)
+         location_st->driver->free(location_st->data);
+   }
+
+   location_st->active = false;
+   location_st->data   = NULL;
+}
+
+static void *rarch_midi_drv_data;
+static struct string_list *rarch_midi_drv_inputs;
+static struct string_list *rarch_midi_drv_outputs;
+static uint8_t *rarch_midi_drv_input_buffer;
+static uint8_t *rarch_midi_drv_output_buffer;
+
+static midi_event_t rarch_midi_drv_input_event;  /* ptr alignment */
+static midi_event_t rarch_midi_drv_output_event; /* ptr alignment */
+
+static bool rarch_midi_drv_input_enabled;
+static bool rarch_midi_drv_output_enabled;
+static bool rarch_midi_drv_output_pending;
+static bool rarch_midi_drv_inited;
+static bool rarch_midi_drv_requested;
+
+static void null_midi_free(void *p) { }
+static void *null_midi_init(const char *input, const char *output) { return (void*)-1; }
+static bool null_midi_get_avail_inputs(struct string_list *inputs) { union string_list_elem_attr attr = {0}; return string_list_append_n(inputs, "Null", STRLEN_CONST("Null"), attr); }
+static bool null_midi_get_avail_outputs(struct string_list *outputs) { union string_list_elem_attr attr = {0}; return string_list_append_n(outputs, "Null", STRLEN_CONST("Null"), attr); }
+static bool null_midi_set_input(void *p, const char *input) { return input == NULL || string_is_equal(input, "Null"); }
+static bool null_midi_set_output(void *p, const char *output) { return output == NULL || string_is_equal(output, "Null"); }
+static bool null_midi_read(void *p, midi_event_t *event) { return false; }
+static bool null_midi_write(void *p, const midi_event_t *event) { return true; }
+static bool null_midi_flush(void *p) { return true; }
+
+static midi_driver_t midi_null = {
+   "null",
+   null_midi_get_avail_inputs,
+   null_midi_get_avail_outputs,
+   null_midi_init,
+   null_midi_free,
+   null_midi_set_input,
+   null_midi_set_output,
+   null_midi_read,
+   null_midi_write,
+   null_midi_flush
+};
+
+static midi_driver_t *midi_drv  = &midi_null;
+
+midi_driver_t *midi_drivers[]   = {
+#if defined(HAVE_ALSA) && !defined(HAVE_HAKCHI) && !defined(HAVE_SEGAM) && !defined(DINGUX)
+   &midi_alsa,
+#endif
+#ifdef HAVE_WINMM
+   &midi_winmm,
+#endif
+#ifdef HAVE_COREMIDI
+   &midi_coremidi,
+#endif
+   &midi_fmsynth,
+   &midi_null
+};
+
+static midi_driver_t *midi_driver_find_driver(const char *ident)
+{
+   size_t i;
+   for (i = 0; i < ARRAY_SIZE(midi_drivers); ++i)
+   {
+      if (string_is_equal(midi_drivers[i]->ident, ident))
+         return midi_drivers[i];
+   }
+
+   RARCH_ERR("[MIDI] Unknown driver \"%s\", falling back to \"null\" driver.\n", ident);
+
+   return &midi_null;
+}
+
+static const void *midi_driver_find_handle(int index)
+{
+   if (index < 0 || index >= (int)ARRAY_SIZE(midi_drivers))
+      return NULL;
+
+   return midi_drivers[index];
+}
+
+/* Not done at driver init: the first WinMM MIDI call after boot
+ * can block for seconds while Windows starts its MIDI service. */
+static bool midi_driver_enum_devices(void)
+{
+   union string_list_elem_attr attr = {0};
+
+   if (!rarch_midi_drv_inited)
+      return false;
+   if (rarch_midi_drv_inputs)
+      return true;
+
+   rarch_midi_drv_inputs  = string_list_new();
+   rarch_midi_drv_outputs = string_list_new();
+
+   if (     rarch_midi_drv_inputs
+         && rarch_midi_drv_outputs
+         && string_list_append_n(rarch_midi_drv_inputs, MIDI_DRIVER_OFF, STRLEN_CONST(MIDI_DRIVER_OFF), attr)
+         && string_list_append_n(rarch_midi_drv_outputs, MIDI_DRIVER_OFF, STRLEN_CONST(MIDI_DRIVER_OFF), attr)
+         && midi_drv->get_avail_inputs(rarch_midi_drv_inputs)
+         && midi_drv->get_avail_outputs(rarch_midi_drv_outputs))
+      return true;
+
+   if (rarch_midi_drv_inputs)
+      string_list_free(rarch_midi_drv_inputs);
+   if (rarch_midi_drv_outputs)
+      string_list_free(rarch_midi_drv_outputs);
+   rarch_midi_drv_inputs  = NULL;
+   rarch_midi_drv_outputs = NULL;
+   return false;
+}
+
+struct string_list *midi_driver_get_avail_inputs(void)
+{
+   midi_driver_enum_devices();
+   return rarch_midi_drv_inputs;
+}
+
+struct string_list *midi_driver_get_avail_outputs(void)
+{
+   midi_driver_enum_devices();
+   return rarch_midi_drv_outputs;
+}
+
+bool midi_driver_set_all_sounds_off(void)
+{
+   midi_event_t event;
+   uint8_t i;
+   uint8_t data[3]     = { 0xB0, 120, 0 };
+   bool result         = true;
+
+   if (!rarch_midi_drv_data || !rarch_midi_drv_output_enabled)
+      return false;
+
+   event.data       = data;
+   event.data_size  = sizeof(data);
+   event.delta_time = 0;
+
+   for (i = 0; i < 16; ++i)
+   {
+      data[0] = 0xB0 | i;
+
+      if (!midi_drv->write(rarch_midi_drv_data, &event))
+         result = false;
+   }
+
+   if (!midi_drv->flush(rarch_midi_drv_data))
+      result = false;
+
+   if (!result)
+      RARCH_ERR("[MIDI] All sounds off failed.\n");
+
+   return result;
+}
+
+bool midi_driver_set_volume(unsigned volume)
+{
+   midi_event_t event;
+   uint8_t         data[8]     = {
+      0xF0, 0x7F, 0x7F, 0x04, 0x01, 0, 0, 0xF7};
+
+   if (!rarch_midi_drv_data || !rarch_midi_drv_output_enabled)
+      return false;
+
+   volume           = (unsigned)(163.83 * volume + 0.5);
+   if (volume > 16383)
+      volume        = 16383;
+
+   data[5]          = (uint8_t)(volume & 0x7F);
+   data[6]          = (uint8_t)(volume >> 7);
+
+   event.data       = data;
+   event.data_size  = sizeof(data);
+   event.delta_time = 0;
+
+   if (!midi_drv->write(rarch_midi_drv_data, &event))
+   {
+      RARCH_ERR("[MIDI] Volume change failed.\n");
+      return false;
+   }
+
+   return true;
+}
+
+static bool midi_driver_init_io_buffers(void)
+{
+   uint8_t *midi_drv_input_buffer  = (uint8_t*)malloc(MIDI_DRIVER_BUF_SIZE);
+   uint8_t *midi_drv_output_buffer = (uint8_t*)malloc(MIDI_DRIVER_BUF_SIZE);
+
+   if (!midi_drv_input_buffer || !midi_drv_output_buffer)
+   {
+      if (midi_drv_input_buffer)
+         free(midi_drv_input_buffer);
+      if (midi_drv_output_buffer)
+         free(midi_drv_output_buffer);
+      return false;
+   }
+
+   rarch_midi_drv_input_buffer           = midi_drv_input_buffer;
+   rarch_midi_drv_output_buffer          = midi_drv_output_buffer;
+
+   rarch_midi_drv_input_event.data       = midi_drv_input_buffer;
+   rarch_midi_drv_input_event.data_size  = 0;
+
+   rarch_midi_drv_output_event.data      = midi_drv_output_buffer;
+   rarch_midi_drv_output_event.data_size = 0;
+
+   return true;
+}
+
+bool midi_driver_synth_active(void)
+{
+   return midi_drv
+       && midi_drv->render
+       && rarch_midi_drv_data
+       && rarch_midi_drv_data != (void*)-1;
+}
+
+bool midi_driver_render_audio(float *out, size_t frames, unsigned rate)
+{
+   if (!midi_driver_synth_active())
+      return false;
+   return midi_drv->render(rarch_midi_drv_data, out, frames, rate);
+}
+
+/* Closes the device and its I/O buffers. The driver stays selected
+ * and the device lists stay valid, so the menu can still offer
+ * another device and the next GET_MIDI_INTERFACE can retry. */
+static void midi_driver_close(void)
+{
+   if (rarch_midi_drv_data)
+   {
+      midi_drv->free(rarch_midi_drv_data);
+      rarch_midi_drv_data = NULL;
+   }
+
+   if (rarch_midi_drv_input_buffer)
+   {
+      free(rarch_midi_drv_input_buffer);
+      rarch_midi_drv_input_buffer = NULL;
+   }
+
+   if (rarch_midi_drv_output_buffer)
+   {
+      free(rarch_midi_drv_output_buffer);
+      rarch_midi_drv_output_buffer = NULL;
+   }
+
+   rarch_midi_drv_input_enabled  = false;
+   rarch_midi_drv_output_enabled = false;
+}
+
+static void midi_driver_free(void)
+{
+   midi_driver_close();
+
+   if (rarch_midi_drv_inputs)
+   {
+      string_list_free(rarch_midi_drv_inputs);
+      rarch_midi_drv_inputs = NULL;
+   }
+
+   if (rarch_midi_drv_outputs)
+   {
+      string_list_free(rarch_midi_drv_outputs);
+      rarch_midi_drv_outputs = NULL;
+   }
+
+   rarch_midi_drv_inited         = false;
+}
+
+static bool midi_driver_open(settings_t *settings)
+{
+   bool ret = true;
+
+   if (rarch_midi_drv_data)
+      return true;
+
+   if (!midi_driver_enum_devices())
+      ret = false;
+   else
+   {
+      char * input  = NULL;
+      char * output = NULL;
+
+      if (string_is_not_equal(settings->arrays.midi_input, MIDI_DRIVER_OFF))
+      {
+         if (string_list_find_elem(rarch_midi_drv_inputs, settings->arrays.midi_input))
+            input = settings->arrays.midi_input;
+         else
+         {
+            RARCH_WARN("[MIDI] Input device \"%s\" unavailable.\n",
+                  settings->arrays.midi_input);
+            configuration_set_string(settings,
+                  settings->arrays.midi_input, MIDI_DRIVER_OFF);
+         }
+      }
+
+      if (string_is_not_equal(settings->arrays.midi_output, MIDI_DRIVER_OFF))
+      {
+         if (string_list_find_elem(rarch_midi_drv_outputs, settings->arrays.midi_output))
+            output = settings->arrays.midi_output;
+         else
+         {
+            RARCH_WARN("[MIDI] Output device \"%s\" unavailable.\n",
+                  settings->arrays.midi_output);
+            configuration_set_string(settings,
+                  settings->arrays.midi_output, MIDI_DRIVER_OFF);
+         }
+      }
+
+      rarch_midi_drv_data = midi_drv->init(input, output);
+      if (!rarch_midi_drv_data)
+         ret = false;
+      else
+      {
+         rarch_midi_drv_input_enabled  = (input  != NULL);
+         rarch_midi_drv_output_enabled = (output != NULL);
+
+         if (!midi_driver_init_io_buffers())
+            ret = false;
+         else
+         {
+            if (input)
+               RARCH_LOG("[MIDI] Input device: \"%s\".\n", input);
+
+            if (output)
+            {
+               RARCH_LOG("[MIDI] Output device: \"%s\".\n", output);
+               midi_driver_set_volume(settings->uints.midi_volume);
+            }
+         }
+      }
+   }
+
+   if (!ret)
+   {
+      midi_driver_close();
+      RARCH_ERR("[MIDI] Initialization failed.\n");
+      return false;
+   }
+   return true;
+}
+
+static bool midi_driver_init(void *data)
+{
+   settings_t *settings = (settings_t*)data;
+
+   midi_drv             = midi_driver_find_driver(
+         settings->arrays.midi_driver);
+
+   if (strcmp(midi_drv->ident, settings->arrays.midi_driver))
+   {
+      configuration_set_string(settings,
+            settings->arrays.midi_driver, midi_drv->ident);
+   }
+
+   rarch_midi_drv_inited = true;
+
+   if (rarch_midi_drv_requested)
+      return midi_driver_open(settings);
+   return true;
+}
+
+void midi_driver_request(bool requested)
+{
+   rarch_midi_drv_requested = requested;
+   if (requested && rarch_midi_drv_inited)
+      midi_driver_open(config_get_ptr());
+}
+
+bool midi_driver_set_input(const char *input)
+{
+   /* Not open yet: the setting is read when a core requests
+    * the interface, so there is nothing to apply now. */
+   if (!rarch_midi_drv_data)
+      return true;
+
+   if (string_is_equal(input, MIDI_DRIVER_OFF))
+      input = NULL;
+
+   if (!midi_drv->set_input(rarch_midi_drv_data, input))
+   {
+      if (input)
+         RARCH_ERR("[MIDI] Failed to change input device to \"%s\".\n", input);
+      else
+         RARCH_ERR("[MIDI] Failed to disable input.\n");
+      return false;
+   }
+
+   if (input)
+      RARCH_LOG("[MIDI] Input device changed to \"%s\".\n", input);
+   else
+      RARCH_LOG("[MIDI] Input disabled.\n");
+
+   rarch_midi_drv_input_enabled = input != NULL;
+
+   return true;
+}
+
+bool midi_driver_set_output(void *settings_data, const char *output)
+{
+   /* Not open yet: the setting is read when a core requests
+    * the interface, so there is nothing to apply now. */
+   if (!rarch_midi_drv_data)
+      return true;
+
+   if (string_is_equal(output, MIDI_DRIVER_OFF))
+      output = NULL;
+
+   if (!midi_drv->set_output(rarch_midi_drv_data, output))
+   {
+      if (output)
+         RARCH_ERR("[MIDI] Failed to change output device to \"%s\".\n", output);
+      else
+         RARCH_ERR("[MIDI] Failed to disable output.\n");
+      return false;
+   }
+
+   if (output)
+   {
+      settings_t *settings = (settings_t*)settings_data;
+      unsigned midi_volume = settings->uints.midi_volume;
+      rarch_midi_drv_output_enabled = true;
+      RARCH_LOG("[MIDI] Output device changed to \"%s\".\n", output);
+
+      midi_driver_set_volume(midi_volume);
+   }
+   else
+   {
+      rarch_midi_drv_output_enabled = false;
+      RARCH_LOG("[MIDI] Output disabled.\n");
+   }
+
+   return true;
+}
+
+bool midi_driver_input_enabled(void)
+{
+   return rarch_midi_drv_input_enabled;
+}
+
+bool midi_driver_output_enabled(void)
+{
+   return rarch_midi_drv_output_enabled;
+}
+
+bool midi_driver_read(uint8_t *byte)
+{
+   static int i = 0;
+
+   if (!rarch_midi_drv_data || !rarch_midi_drv_input_enabled || !byte)
+   {
+#ifdef DEBUG
+      if (!rarch_midi_drv_data)
+         RARCH_ERR("[MIDI] midi_driver_read called on uninitialized driver.\n");
+      else if (!rarch_midi_drv_input_enabled)
+         RARCH_ERR("[MIDI] midi_driver_read called when input is disabled.\n");
+      else
+         RARCH_ERR("[MIDI] midi_driver_read called with null pointer.\n");
+#endif
+      return false;
+   }
+
+   if (i == (int)rarch_midi_drv_input_event.data_size)
+   {
+      rarch_midi_drv_input_event.data_size = MIDI_DRIVER_BUF_SIZE;
+      if (!midi_drv->read(rarch_midi_drv_data, &rarch_midi_drv_input_event))
+      {
+         rarch_midi_drv_input_event.data_size = i;
+         return false;
+      }
+
+      i = 0;
+
+#ifdef DEBUG
+      if (rarch_midi_drv_input_event.data_size == 1)
+         RARCH_LOG("[MIDI] In [0x%02X].\n",
+               rarch_midi_drv_input_event.data[0]);
+      else if (rarch_midi_drv_input_event.data_size == 2)
+         RARCH_LOG("[MIDI] In [0x%02X, 0x%02X].\n",
+               rarch_midi_drv_input_event.data[0],
+               rarch_midi_drv_input_event.data[1]);
+      else if (rarch_midi_drv_input_event.data_size == 3)
+         RARCH_LOG("[MIDI] In [0x%02X, 0x%02X, 0x%02X].\n",
+               rarch_midi_drv_input_event.data[0],
+               rarch_midi_drv_input_event.data[1],
+               rarch_midi_drv_input_event.data[2]);
+      else
+         RARCH_LOG("[MIDI] In [0x%02X, ...], size %u.\n",
+               rarch_midi_drv_input_event.data[0],
+               rarch_midi_drv_input_event.data_size);
+#endif
+   }
+
+   *byte = rarch_midi_drv_input_event.data[i++];
+
+   return true;
+}
+
+bool midi_driver_write(uint8_t byte, uint32_t delta_time)
+{
+   static int event_size;
+
+   if (!rarch_midi_drv_data || !rarch_midi_drv_output_enabled)
+   {
+#ifdef DEBUG
+      if (!rarch_midi_drv_data)
+         RARCH_ERR("[MIDI] midi_driver_write called on uninitialized driver.\n");
+      else
+         RARCH_ERR("[MIDI] midi_driver_write called when output is disabled.\n");
+#endif
+      return false;
+   }
+
+   if (byte >= 0x80)
+   {
+      if (     rarch_midi_drv_output_event.data_size
+            && rarch_midi_drv_output_event.data[0] == 0xF0)
+      {
+         if (byte == 0xF7)
+            event_size = (int)rarch_midi_drv_output_event.data_size + 1;
+         else
+         {
+            if (!midi_drv->write(rarch_midi_drv_data,
+                     &rarch_midi_drv_output_event))
+               return false;
+
+#ifdef DEBUG
+            switch (rarch_midi_drv_output_event.data_size)
+            {
+               case 1:
+                  RARCH_LOG("[MIDI] Out [0x%02X].\n",
+                        rarch_midi_drv_output_event.data[0]);
+                  break;
+               case 2:
+                  RARCH_LOG("[MIDI] Out [0x%02X, 0x%02X].\n",
+                        rarch_midi_drv_output_event.data[0],
+                        rarch_midi_drv_output_event.data[1]);
+                  break;
+               case 3:
+                  RARCH_LOG("[MIDI] Out [0x%02X, 0x%02X, 0x%02X].\n",
+                        rarch_midi_drv_output_event.data[0],
+                        rarch_midi_drv_output_event.data[1],
+                        rarch_midi_drv_output_event.data[2]);
+                  break;
+               default:
+                  RARCH_LOG("[MIDI] Out [0x%02X, ...], size %u.\n",
+                        rarch_midi_drv_output_event.data[0],
+                        rarch_midi_drv_output_event.data_size);
+                  break;
+            }
+#endif
+
+            rarch_midi_drv_output_pending             = true;
+            event_size                                = (int)midi_driver_get_event_size(byte);
+            rarch_midi_drv_output_event.data_size     = 0;
+            rarch_midi_drv_output_event.delta_time    = 0;
+         }
+      }
+      else
+      {
+         event_size                                   = (int)midi_driver_get_event_size(byte);
+         rarch_midi_drv_output_event.data_size        = 0;
+         rarch_midi_drv_output_event.delta_time       = 0;
+      }
+   }
+
+   if (rarch_midi_drv_output_event.data_size < MIDI_DRIVER_BUF_SIZE)
+   {
+      rarch_midi_drv_output_event.data[rarch_midi_drv_output_event.data_size] = byte;
+      ++rarch_midi_drv_output_event.data_size;
+      rarch_midi_drv_output_event.delta_time += delta_time;
+   }
+   else
+   {
+#ifdef DEBUG
+      RARCH_ERR("[MIDI] Output event dropped.\n");
+#endif
+      return false;
+   }
+
+   if (event_size == (int)rarch_midi_drv_output_event.data_size)
+   {
+      if (!midi_drv->write(rarch_midi_drv_data, &rarch_midi_drv_output_event))
+         return false;
+
+#ifdef DEBUG
+      switch (rarch_midi_drv_output_event.data_size)
+      {
+         case 1:
+            RARCH_LOG("[MIDI] Out [0x%02X].\n",
+                  rarch_midi_drv_output_event.data[0]);
+            break;
+         case 2:
+            RARCH_LOG("[MIDI] Out [0x%02X, 0x%02X].\n",
+                  rarch_midi_drv_output_event.data[0],
+                  rarch_midi_drv_output_event.data[1]);
+            break;
+         case 3:
+            RARCH_LOG("[MIDI] Out [0x%02X, 0x%02X, 0x%02X].\n",
+                  rarch_midi_drv_output_event.data[0],
+                  rarch_midi_drv_output_event.data[1],
+                  rarch_midi_drv_output_event.data[2]);
+            break;
+         default:
+            RARCH_LOG("[MIDI] Out [0x%02X, ...], size %u.\n",
+                  rarch_midi_drv_output_event.data[0],
+                  rarch_midi_drv_output_event.data_size);
+            break;
+      }
+#endif
+
+      rarch_midi_drv_output_pending             = true;
+      rarch_midi_drv_output_event.data_size     = 0;
+      rarch_midi_drv_output_event.delta_time    = 0;
+   }
+
+   return true;
+}
+
+bool midi_driver_flush(void)
+{
+   if (!rarch_midi_drv_data)
+      return false;
+
+   if (rarch_midi_drv_output_pending)
+      rarch_midi_drv_output_pending = !midi_drv->flush(rarch_midi_drv_data);
+
+   return !rarch_midi_drv_output_pending;
+}
+
+size_t midi_driver_get_event_size(uint8_t status)
+{
+   static const uint8_t midi_drv_ev_sizes[128]                     =
+   {
+      3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+      3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+      3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+      3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+      2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+      2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+      3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+      0, 2, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+   };
+
+   if (status < 0x80)
+   {
+#ifdef DEBUG
+      RARCH_ERR("[MIDI] midi_driver_get_event_size called with invalid status.\n");
+#endif
+      return 0;
+   }
+
+   return midi_drv_ev_sizes[status - 0x80];
+}
+
+/**
+ * find_driver_nonempty:
+ * @label              : string of driver type to be found.
+ * @i                  : index of driver.
+ * @str                : identifier name of the found driver
+ *                       gets written to this string.
+ * @len                : size of @str.
+ *
+ * Find driver based on @label.
+ *
+ * Returns: NULL if no driver based on @label found, otherwise
+ * pointer to driver.
+ **/
+static size_t find_driver_nonempty(
+      const char *label, int i, char *s, size_t len)
+{
+   if (!strcmp(label, "camera_driver"))
+   {
+      if (camera_drivers[i])
+         return strlcpy(s, camera_drivers[i]->ident, len);
+   }
+   else if (!strcmp(label, "location_driver"))
+   {
+      if (location_drivers[i])
+         return strlcpy(s, location_drivers[i]->ident, len);
+   }
+#ifdef HAVE_MENU
+   else if (!strcmp(label, "menu_driver"))
+   {
+      if (menu_ctx_drivers[i])
+         return strlcpy(s, menu_ctx_drivers[i]->ident, len);
+   }
+#endif
+   else if (!strcmp(label, "input_driver"))
+   {
+      if (input_drivers[i])
+         return strlcpy(s, input_drivers[i]->ident, len);
+   }
+   else if (!strcmp(label, "input_joypad_driver"))
+   {
+      if (joypad_drivers[i])
+         return strlcpy(s, joypad_drivers[i]->ident, len);
+   }
+   else if (!strcmp(label, "video_driver"))
+   {
+      if (video_drivers[i])
+         return strlcpy(s, video_drivers[i]->ident, len);
+   }
+   else if (!strcmp(label, "audio_driver"))
+   {
+      if (audio_drivers[i])
+         return strlcpy(s, audio_drivers[i]->ident, len);
+   }
+#ifdef HAVE_MICROPHONE
+   else if (!strcmp(label, "microphone_driver"))
+   {
+      if (microphone_drivers[i])
+         return strlcpy(s, microphone_drivers[i]->ident, len);
+   }
+#endif
+   else if (!strcmp(label, "record_driver"))
+   {
+      if (record_drivers[i])
+         return strlcpy(s, record_drivers[i]->ident, len);
+   }
+   else if (!strcmp(label, "midi_driver"))
+   {
+      if (midi_driver_find_handle(i))
+         return strlcpy(s, midi_drivers[i]->ident, len);
+   }
+   else if (!strcmp(label, "audio_resampler_driver"))
+   {
+      if (audio_resampler_driver_find_handle(i))
+         return strlcpy(s, audio_resampler_driver_find_ident(i), len);
+   }
+#ifdef HAVE_BLUETOOTH
+   else if (!strcmp(label, "bluetooth_driver"))
+   {
+      if (bluetooth_drivers[i])
+         return strlcpy(s, bluetooth_drivers[i]->ident, len);
+   }
+#endif
+#ifdef HAVE_WIFI
+   else if (!strcmp(label, "wifi_driver"))
+   {
+      if (wifi_drivers[i])
+         return strlcpy(s, wifi_drivers[i]->ident, len);
+   }
+#endif
+#ifdef HAVE_CLOUDSYNC
+   else if (!strcmp(label, "cloud_sync_driver"))
+   {
+      if (cloud_sync_drivers[i])
+         return strlcpy(s, cloud_sync_drivers[i]->ident, len);
+   }
+#endif
+   else if (!strcmp(label, "ui_companion_driver"))
+   {
+      const char *ident = ui_companion_wimp_find_ident(i);
+      if (ident)
+         return strlcpy(s, ident, len);
+   }
+   return 0;
+}
+
+int driver_find_index(const char *label, const char *drv)
+{
+   int i;
+   char str[NAME_MAX_LENGTH];
+
+   str[0] = '\0';
+
+   for (i = 0;
+         find_driver_nonempty(label, i, str, sizeof(str)) > 0; i++)
+   {
+      if (!*str)
+         break;
+      if (string_is_equal_noncase(drv, str))
+         return i;
+   }
+
+   return -1;
+}
+
+/**
+ * driver_find_last:
+ * @label              : string of driver type to be found.
+ * @s                  : identifier of driver to be found.
+ * @len                : size of @s.
+ *
+ * Find last driver in driver array.
+ **/
+static void driver_find_last(const char *label, char *s, size_t len)
+{
+   int i;
+   for (i = 0;
+         find_driver_nonempty(label, i, s, len) > 0; i++) { }
+   if (i)
+      i = i - 1;
+   else
+      i = 0;
+   find_driver_nonempty(label, i, s, len);
+}
+
+/**
+ * driver_find_prev:
+ * @label              : string of driver type to be found.
+ * @s                  : identifier of driver to be found.
+ * @len                : size of @s.
+ *
+ * Find previous driver in driver array.
+ **/
+static size_t driver_find_prev(const char *label, char *s, size_t len)
+{
+   int i = driver_find_index(label, s);
+
+   if (i > 0)
+      return find_driver_nonempty(label, i - 1, s, len);
+
+   RARCH_WARN(
+         "Couldn't find any previous driver (current one: \"%s\").\n", s);
+   return 0;
+}
+
+/**
+ * driver_find_next:
+ * @label              : string of driver type to be found.
+ * @s                  : identifier of driver to be found.
+ * @len                : size of @s.
+ *
+ * Find next driver in driver array.
+ **/
+static size_t driver_find_next(const char *label, char *s, size_t len)
+{
+   int i = driver_find_index(label, s);
+   if (i >= 0 && string_is_not_equal(s, "null"))
+      return find_driver_nonempty(label, i + 1, s, len);
+   RARCH_WARN("%s (current one: \"%s\").\n",
+         msg_hash_to_str(MSG_COULD_NOT_FIND_ANY_NEXT_DRIVER),
+         s);
+   return 0;
+}
+
+static float audio_driver_monitor_adjust_system_rates(
+      double input_sample_rate,
+      double input_fps,
+      float video_refresh_rate,
+      unsigned video_swap_interval,
+      unsigned black_frame_insertion,
+      unsigned shader_subframes,
+      float audio_max_timing_skew)
+{
+   float inp_sample_rate        = input_sample_rate;
+
+   /*  This much like the auto swap interval algorithm and will
+    *  find the correct desired target rate the majority of sane
+    *  cases. Any failures should be no worse than the previous
+    *  very incomplete high hz skew adjustments. */
+   float refresh_ratio                   = video_refresh_rate/input_fps;
+   unsigned refresh_closest_multiple     = (unsigned)(refresh_ratio + 0.5f);
+   float target_video_sync_rate          = video_refresh_rate;
+   float timing_skew                     = 0.0f;
+
+   if (refresh_closest_multiple > 1)
+      target_video_sync_rate /= (((float)black_frame_insertion + 1.0f) * (float)video_swap_interval * (float)shader_subframes);
+
+   timing_skew            =
+      fabs(1.0f - input_fps / target_video_sync_rate);
+   if (timing_skew <= audio_max_timing_skew)
+      return (inp_sample_rate * target_video_sync_rate / input_fps);
+   return inp_sample_rate;
+}
+
+#ifdef HAVE_OPENXR
+/* Once per content and rate: a headset whose rate doesn't fit the core
+ * judders, and only its runtime can change the rate. */
+static void driver_headset_notice(runloop_state_t *runloop_st,
+      video_driver_state_t *video_st, unsigned fit, double input_fps)
+{
+   char msg[512];
+   size_t _len;
+   unsigned hz = (unsigned)(video_st->headset_hz + 0.5f);
+   if (     fit || !hz || input_fps <= 0.0
+         || runloop_st->current_core_type == CORE_TYPE_DUMMY
+         || (     hz        == video_st->headset_notice_hz
+               && input_fps == video_st->headset_notice_fps))
+      return;
+   video_st->headset_notice_hz  = hz;
+   video_st->headset_notice_fps = input_fps;
+   _len = snprintf(msg, sizeof(msg),
+         msg_hash_to_str(MSG_OPENXR_RATE_MISFIT), hz, input_fps);
+   RARCH_WARN("[OpenXR] %s\n", msg);
+   runloop_msg_queue_push(msg, _len, 2, 480, false, NULL,
+         MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+}
+#endif
+
+/* @audio_input, when set, receives the audio input rate instead of the
+ * audio driver: the caller hands it over itself. */
+static void driver_adjust_system_rates(
+      runloop_state_t *runloop_st,
+      video_driver_state_t *video_st,
+      settings_t *settings,
+      double *audio_input)
+{
+   double input_sample_rate               = video_st->av_info.timing.sample_rate;
+   double input_fps                       = video_st->av_info.timing.fps;
+   float video_refresh_rate               = settings->floats.video_refresh_rate;
+   float audio_max_timing_skew            = settings->floats.audio_max_timing_skew;
+   unsigned video_swap_interval           = settings->uints.video_swap_interval;
+   unsigned black_frame_insertion         = settings->uints.video_black_frame_insertion;
+   unsigned shader_subframes              = settings->uints.video_shader_subframes;
+   bool vrr_runloop_enable                = settings->bools.vrr_runloop_enable;
+   bool video_adaptive_vsync              = settings->bools.video_adaptive_vsync;
+   unsigned sync_plan                     = RUNLOOP_SYNC_VSYNC_HOLDS
+         | (vrr_runloop_enable ? RUNLOOP_SYNC_EXACT_RATE : 0);
+#ifdef HAVE_OPENXR
+   unsigned headset_fit                   = video_xr_pace_interval(
+         video_st->headset_hz, (float)input_fps, audio_max_timing_skew,
+         MAXIMUM_SWAP_INTERVAL);
+#endif
+
+   /* Update video swap interval if automatic
+    * switching is enabled */
+   runloop_set_video_swap_interval(settings);
+   video_swap_interval = runloop_get_video_swap_interval(video_swap_interval);
+
+#ifdef HAVE_OPENXR
+   /* A headset whose rate fits the core paces it in the window's place:
+    * its rate and interval stand in for the display's. Not under
+    * threaded video, where the driver's frame, which waits for the
+    * headset, does not hold the core. */
+   video_st->headset_vsync    = settings->bools.video_vsync;
+   video_st->headset_interval = (video_st->headset_vsync
+         && !video_driver_thread_wrapper_active()) ? headset_fit : 0;
+   /* A headset's own context begins and ends its frame in every core
+    * frame, so with no fit the core runs at the headset's rate; with a
+    * window, the window's vsync paces, and the wrapper holds the core
+    * at its own rate. */
+   video_st->headset_runloop_hz = (     !video_st->headset_interval
+         && !video_driver_thread_wrapper_active()
+         && video_context_driver_headset_inline())
+      ? video_st->headset_hz : 0.0f;
+   if (video_st->headset_interval)
+   {
+      video_refresh_rate    = video_st->headset_hz;
+      video_swap_interval   = video_st->headset_interval;
+      black_frame_insertion = 0;
+      shader_subframes      = 1;
+      vrr_runloop_enable    = false;
+      sync_plan             = RUNLOOP_SYNC_VSYNC_HOLDS;
+      RARCH_LOG("[Video] The headset paces the core: %.2f Hz / %u.\n",
+            video_st->headset_hz, video_st->headset_interval);
+   }
+   driver_headset_notice(runloop_st, video_st, headset_fit, input_fps);
+#endif
+
+   if (input_fps > 0.0)
+   {
+      float timing_skew_hz          = video_refresh_rate;
+
+      if (retro_atomic_load_acquire_int(&video_st->crt_switching_active))
+         timing_skew_hz             = input_fps;
+      video_st->core_hz             = input_fps;
+
+      sync_plan = runloop_sync_plan_for(timing_skew_hz, (float)input_fps,
+            ((float)black_frame_insertion + 1.0f)
+            * (float)video_swap_interval * (float)shader_subframes,
+            audio_max_timing_skew, vrr_runloop_enable);
+
+      if (!(sync_plan & RUNLOOP_SYNC_WITHIN_SKEW) && !vrr_runloop_enable)
+         RARCH_LOG("[Video] Timings deviate too much. Will not adjust."
+               " (Display = %.2f Hz, Game = %.2f Hz)\n",
+               timing_skew_hz, (float)input_fps);
+      else if (vrr_runloop_enable
+            && (sync_plan & RUNLOOP_SYNC_VSYNC_HOLDS)
+            && !(sync_plan & RUNLOOP_SYNC_EXACT_RATE))
+         RARCH_LOG("[Video] Game FPS above what the display presents at "
+               "this interval; VSync paces it instead of the exact rate.\n");
+   }
+
+   if (input_sample_rate > 0.0)
+   {
+      audio_driver_state_t *audio_st      = audio_state_get_ptr();
+      double input                        = input_sample_rate;
+      if (!(sync_plan & RUNLOOP_SYNC_EXACT_RATE))
+         input =
+            audio_driver_monitor_adjust_system_rates(
+                  input_sample_rate,
+                  input_fps,
+                  video_refresh_rate,
+                  video_swap_interval,
+                  black_frame_insertion,
+                  shader_subframes,
+                  audio_max_timing_skew);
+
+      if (audio_input)
+         *audio_input    = input;
+      else
+         audio_st->input = input;
+
+      RARCH_LOG("[Audio] Set audio input rate to: %.2f Hz.\n", input);
+   }
+
+   runloop_st->flags &= ~RUNLOOP_FLAG_FORCE_NONBLOCK;
+
+   if (!(sync_plan & RUNLOOP_SYNC_VSYNC_HOLDS))
+   {
+      /* We won't be able to do VSync reliably
+         when game FPS > monitor FPS. */
+      runloop_st->flags |= RUNLOOP_FLAG_FORCE_NONBLOCK;
+      RARCH_LOG("[Video] Game FPS > Monitor FPS. Cannot rely on VSync.\n");
+
+      if (video_st->data)
+      {
+         if (video_st->current_video->set_nonblock_state)
+            video_st->current_video->set_nonblock_state(
+                  video_st->data, true,
+                  video_driver_test_all_flags(GFX_CTX_FLAGS_ADAPTIVE_VSYNC)
+                  && video_adaptive_vsync,
+                  video_swap_interval);
+      }
+      return;
+   }
+
+   if (video_st->data)
+      driver_set_nonblock_state();
+}
+
+bool driver_set_audio_input_rate(void)
+{
+   double input = 0.0;
+   driver_adjust_system_rates(runloop_state_get_ptr(), video_state_get_ptr(),
+         config_get_ptr(), &input);
+   return audio_driver_set_input_rate(input);
+}
+
+/**
+ * driver_set_nonblock_state:
+ *
+ * Sets audio and video drivers to nonblock state (if enabled).
+ *
+ * If nonblock state is false, sets
+ * blocking state for both audio and video drivers instead.
+ **/
+void driver_set_nonblock_state(void)
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   input_driver_state_t
+      *input_st                = input_state_get_ptr();
+   audio_driver_state_t
+      *audio_st                = audio_state_get_ptr();
+   video_driver_state_t
+      *video_st                = video_state_get_ptr();
+   bool                 enable = input_st ?
+      (input_st->flags & INP_FLAG_NONBLOCKING) : false;
+   settings_t       *settings  = config_get_ptr();
+   bool audio_sync             = settings->bools.audio_sync;
+   bool video_vsync            = settings->bools.video_vsync;
+   bool adaptive_vsync         = settings->bools.video_adaptive_vsync;
+   unsigned swap_interval      = runloop_get_video_swap_interval(
+         settings->uints.video_swap_interval);
+   bool video_driver_active    = (video_st->main_flags  & VIDEO_FLAG_ACTIVE) ? true : false;
+   bool audio_driver_active    = (AUDIO_FLAGS_GET(audio_st)  & AUDIO_FLAG_ACTIVE) ? true : false;
+   bool runloop_force_nonblock = (runloop_st->flags & RUNLOOP_FLAG_FORCE_NONBLOCK) ? true : false;
+
+   if (video_driver_active && video_st->data)
+   {
+      if (video_st->current_video->set_nonblock_state)
+         video_st->current_video->set_nonblock_state(video_st->data,
+               !runloop_vsync_blocks(video_vsync,
+                  settings->bools.video_scanline_sync,
+                  runloop_force_nonblock, enable),
+               video_driver_test_all_flags(GFX_CTX_FLAGS_ADAPTIVE_VSYNC)
+               && adaptive_vsync, swap_interval);
+   }
+
+   if (audio_driver_active && audio_st->context_audio_data)
+      audio_driver_set_nonblock_state(audio_sync ? enable : true);
+}
+
+void drivers_init(
+      settings_t *settings,
+      int flags,
+      enum driver_lifetime_flags lifetime_flags,
+      bool verbosity_enabled)
+{
+   runloop_state_t *runloop_st       = runloop_state_get_ptr();
+   audio_driver_state_t *audio_st    = audio_state_get_ptr();
+   input_driver_state_t *input_st    = input_state_get_ptr();
+   video_driver_state_t *video_st    = video_state_get_ptr();
+#ifdef HAVE_MENU
+   struct menu_state *menu_st     = menu_state_get_ptr();
+#endif
+   camera_driver_state_t
+      *camera_st                  = camera_state_get_ptr();
+   location_driver_state_t
+      *location_st                = location_state_get_ptr();
+   bool video_is_threaded         = VIDEO_DRIVER_IS_THREADED_INTERNAL(video_st);
+   gfx_display_t *p_disp          = disp_get_ptr();
+#if defined(HAVE_GFX_WIDGETS)
+   bool video_font_enable         = settings->bools.video_font_enable;
+   bool menu_enable_widgets       = settings->bools.menu_enable_widgets;
+   dispgfx_widget_t *p_dispwidget = dispwidget_get_ptr();
+   /* By default, we want display widgets to persist through driver reinits. */
+   p_dispwidget->persisting       = true;
+#endif
+#ifdef HAVE_MENU
+   /* By default, we want the menu to persist through driver reinits. */
+   if (menu_st)
+      menu_st->flags             |= MENU_ST_FLAG_DATA_OWN;
+#endif
+
+   DRIVER_FLAGS_NORMALIZE(flags);
+
+   /* Content av_info based automatic swap interval must be set early. */
+   runloop_set_video_swap_interval(settings);
+
+   /* Initialize video driver */
+   if (flags & DRIVER_VIDEO_MASK)
+   {
+      struct retro_hw_render_callback *hwr   =
+         VIDEO_DRIVER_GET_HW_CONTEXT_INTERNAL(video_st);
+
+      video_st->frame_time_count = 0;
+
+#ifdef HAVE_OPENXR
+      /* Before video makes a headset session. */
+      input_openxr_register();
+#endif
+      video_driver_lock_new();
+#ifdef HAVE_VIDEO_FILTER
+      video_driver_filter_free();
+#endif
+      video_driver_cached_frame_invalidate();
+      if (!video_driver_init_internal(&video_is_threaded,
+               verbosity_enabled))
+         retroarch_fail(1, "video_driver_init_internal()");
+      /* An input driver kept across the restart has been handed back
+       * by now; if nothing took it, it is not left behind. */
+      input_driver_drop_kept();
+
+#ifdef HAVE_THREADS
+      /* An OpenGL core under the threaded wrapper renders on this
+       * thread with a context of its own; it must be current here
+       * before context_reset creates the core's objects in it. */
+      if (video_driver_thread_wrapper_active())
+         video_thread_hw_bind_core_context(video_state_get_ptr()->data);
+#endif
+      if (video_driver_cache_context_ack_test())
+      {
+         /* The core asked for its context to be kept, it was, and the
+          * core is not told of the restart. The hardware render
+          * interface it holds has to be the one in front now, though:
+          * it is, brought up to date, unless the driver in front hands
+          * out another one altogether - and then the core cannot go on
+          * with what it has, and is reset after all, its objects
+          * destroyed first on the device that was kept. */
+         if (!video_driver_hw_render_interface_kept())
+         {
+            video_driver_invalidate_hw_render_cache();
+            if (hwr->context_destroy)
+               hwr->context_destroy();
+            video_driver_hw_render_interface_note(NULL);
+            if (hwr->context_reset)
+               hwr->context_reset();
+         }
+      }
+      else if (hwr->context_reset)
+         hwr->context_reset();
+#ifdef HAVE_THREADS
+      /* Taken for context_reset by video_thread_hw_bind_core_context;
+       * the core's next run takes it again. */
+      video_thread_core_context_release();
+#endif
+      video_driver_cache_context_ack_clear();
+      runloop_st->frame_time_last = 0;
+   }
+
+   /* Regular display refresh rate startup autoswitch based on content av_info. */
+   if (     flags & (DRIVER_VIDEO_MASK | DRIVER_AUDIO_MASK)
+         && !runloop_is_inited())
+   {
+      float refresh_rate               = video_st->av_info.timing.fps;
+      unsigned autoswitch_refresh_rate = settings->uints.video_autoswitch_refresh_rate;
+      bool exclusive_fullscreen        = settings->bools.video_fullscreen && !settings->bools.video_windowed_fullscreen;
+      bool windowed_fullscreen         = settings->bools.video_fullscreen &&  settings->bools.video_windowed_fullscreen;
+      bool all_fullscreen              = settings->bools.video_fullscreen ||  settings->bools.video_windowed_fullscreen;
+
+      /* Making a switch from PC standard 60 Hz to NTSC 59.94 is excluded by the last condition. */
+      if (     (refresh_rate > 0.0f)
+            && !settings->uints.crt_switch_resolution
+            && !settings->bools.vrr_runloop_enable
+            && video_display_server_has_resolution_list()
+            && (autoswitch_refresh_rate != AUTOSWITCH_REFRESH_RATE_OFF)
+            && (fabs(settings->floats.video_refresh_rate - refresh_rate) > 1))
+      {
+         if (   ((autoswitch_refresh_rate == AUTOSWITCH_REFRESH_RATE_EXCLUSIVE_FULLSCREEN) && exclusive_fullscreen)
+             || ((autoswitch_refresh_rate == AUTOSWITCH_REFRESH_RATE_WINDOWED_FULLSCREEN)  && windowed_fullscreen)
+             || ((autoswitch_refresh_rate == AUTOSWITCH_REFRESH_RATE_ALL_FULLSCREEN)       && all_fullscreen))
+         {
+            bool video_switch_refresh_rate = false;
+
+            video_switch_refresh_rate_maybe(&refresh_rate, &video_switch_refresh_rate);
+            if (video_switch_refresh_rate && video_display_server_set_refresh_rate(refresh_rate))
+               video_monitor_set_refresh_rate(refresh_rate);
+         }
+      }
+   }
+
+   /* Adjust rates */
+   if (flags & (DRIVER_VIDEO_MASK | DRIVER_AUDIO_MASK))
+      driver_adjust_system_rates(runloop_st, video_st, settings, NULL);
+
+   /* Initialize audio driver */
+   if (flags & DRIVER_AUDIO_MASK)
+   {
+      audio_driver_init_internal(
+            settings,
+            audio_st->callback.callback != NULL);
+      audio_driver_drop_kept();
+      /* Whether or not init succeeded: the list is how the user gets
+       * out of a failed device choice. */
+      audio_driver_refresh_devices_list();
+   }
+
+#ifdef HAVE_MICROPHONE
+   if (flags & DRIVER_MICROPHONE_MASK)
+   {
+      microphone_driver_init_internal(settings);
+      /* Whether or not init succeeded, as for audio: the list is how
+       * the user gets out of a failed device choice. */
+      microphone_driver_refresh_devices_list();
+   }
+#endif
+
+   if (flags & DRIVER_CAMERA_MASK)
+   {
+      /* Only initialize camera driver if we're ever going to use it. */
+      if (camera_st->active)
+      {
+         /* Resource leaks will follow if camera is initialized twice. */
+         if (!camera_st->data)
+         {
+            if (!camera_driver_find_driver("camera driver",
+                     verbosity_enabled))
+               retroarch_fail(1, "find_camera_driver()");
+
+            if (camera_st->driver)
+            {
+               camera_st->data = camera_st->driver->init(
+                     *settings->arrays.camera_device
+                     ? settings->arrays.camera_device : NULL,
+                     camera_st->cb.caps,
+                     VIDEO_SCALE_PACK(
+                        VIDEO_SCALE_W(settings->uints.camera_dims)
+                        ? VIDEO_SCALE_W(settings->uints.camera_dims)
+                        : camera_st->cb.width,
+                        VIDEO_SCALE_H(settings->uints.camera_dims)
+                        ? VIDEO_SCALE_H(settings->uints.camera_dims)
+                        : camera_st->cb.height));
+
+               if (!camera_st->data)
+               {
+                  RARCH_ERR("Failed to initialize camera driver. Will continue without camera.\n");
+                  camera_st->active = false;
+               }
+
+               if (camera_st->cb.initialized)
+                  camera_st->cb.initialized();
+            }
+         }
+      }
+   }
+
+#ifdef HAVE_BLUETOOTH
+   if (flags & DRIVER_BLUETOOTH_MASK)
+      bluetooth_driver_ctl(RARCH_BLUETOOTH_CTL_INIT, NULL);
+#endif
+#ifdef HAVE_WIFI
+   if ((flags & DRIVER_WIFI_MASK))
+      wifi_driver_ctl(RARCH_WIFI_CTL_INIT, NULL);
+#endif
+
+   if (flags & DRIVER_LOCATION_MASK)
+   {
+      /* Only initialize location driver if we're ever going to use it. */
+      if (location_st->active)
+         if (!init_location(&runloop_state_get_ptr()->system,
+                  &location_driver_st, settings->arrays.location_driver,
+                  verbosity_is_enabled()))
+            location_st->active = false;
+   }
+
+#ifdef HAVE_MENU
+   if (flags & DRIVER_INPUT_MASK)
+      menu_st->input_pointer_hw_state.flags |= MENU_INP_PTR_FLG_RESET;
+#endif
+
+   /* The running core's entry stays: its system info came from its
+    * own open, and nothing here reads the core again. One freed with
+    * the drivers is made anew, and CMD_EVENT_CORE_INFO_INIT below
+    * fills it in once it has rebuilt the list. */
+   {
+      core_info_t *current = NULL;
+      core_info_get_current_core(&current);
+      if (!current)
+         core_info_init_current_core();
+   }
+
+   if (flags & (DRIVER_VIDEO_MASK | DRIVER_MENU_MASK))
+   {
+#if defined(HAVE_GFX_WIDGETS)
+      /* Note that we only enable widgets if 'video_font_enable'
+       * is true. 'video_font_enable' corresponds to the generic
+       * 'On-Screen Notifications' setting, which should serve as
+       * a global notifications on/off toggle switch */
+      if (   video_font_enable
+          && menu_enable_widgets
+          && video_st->data
+          && video_st->current_video
+          && video_st->current_video->gfx_widgets_enabled
+          && video_st->current_video->gfx_widgets_enabled(video_st->data))
+      {
+         bool rarch_force_fullscreen = ((uint32_t)retro_atomic_load_relaxed_int(&video_st->flags) &
+            VIDEO_FLAG_FORCE_FULLSCREEN) ? true : false;
+         bool video_is_fullscreen    = settings->bools.video_fullscreen
+                                    || rarch_force_fullscreen;
+         unsigned output_size        = VIDEO_DRIVER_OUTPUT_DIMS(video_st);
+
+         p_dispwidget->active= gfx_widgets_init(
+               p_disp,
+               anim_get_ptr(),
+               settings,
+               (uintptr_t)&p_dispwidget->active,
+               video_is_threaded,
+               output_size,
+               video_is_fullscreen,
+               settings->paths.directory_assets,
+               settings->paths.path_font);
+      }
+      else
+#endif
+      {
+         gfx_display_init_first_driver(p_disp, video_is_threaded);
+      }
+   }
+
+#ifdef HAVE_LAKKA_SWITCH
+   /* Parse the Hekate boot entries and restore the saved reboot
+    * payload before the menu driver is initialised, so the first
+    * menu build already shows the right destination. */
+   r2p_load_selection(settings);
+#endif
+
+#ifdef HAVE_MENU
+   if (flags & DRIVER_VIDEO_MASK)
+   {
+      /* Initialize menu driver */
+      if (flags & DRIVER_MENU_MASK)
+      {
+         if (!menu_driver_init(video_is_threaded))
+             RARCH_ERR("Unable to init menu driver.\n");
+
+#ifdef HAVE_LIBRETRODB
+         menu_explore_context_init();
+#endif
+         menu_contentless_cores_context_init();
+      }
+      else if (     menu_st->driver_ctx
+                 && menu_st->driver_ctx->context_reset)
+         /* Counterpart of the video-only context_destroy in
+          * driver_uninit(): the menu survived the video swap with
+          * its state intact but its fonts/textures released, so
+          * rebuild them against the new video driver instance. A
+          * no-op when the menu was never initialised (NULL userdata
+          * returns early in every menu driver's context_reset). */
+         menu_st->driver_ctx->context_reset(menu_st->userdata,
+               video_is_threaded);
+   }
+
+   /* Initialising the menu driver will also initialise
+    * core info - if we are not initialising the menu
+    * driver, must initialise core info 'by hand' */
+   if (     (!(lifetime_flags & DRIVER_LIFETIME_RESET)
+               || (flags & DRIVER_MENU_MASK))
+         && (!(flags & DRIVER_VIDEO_MASK)
+               || !(flags & DRIVER_MENU_MASK)))
+   {
+      command_event(CMD_EVENT_CORE_INFO_INIT, NULL);
+      if (!(runloop_st->current_core.flags & RETRO_CORE_FLAG_SYMBOLS_INITED))
+         command_event(CMD_EVENT_LOAD_CORE_PERSIST, NULL);
+   }
+
+#else
+   /* Qt uses core info, even if the menu is disabled */
+   if (!(lifetime_flags & DRIVER_LIFETIME_RESET)
+         || (flags & DRIVER_MENU_MASK))
+   {
+      command_event(CMD_EVENT_CORE_INFO_INIT, NULL);
+      if (!(runloop_st->current_core.flags & RETRO_CORE_FLAG_SYMBOLS_INITED))
+         command_event(CMD_EVENT_LOAD_CORE_PERSIST, NULL);
+   }
+#endif
+
+   /* Keep non-throttled state as good as possible. */
+   if (flags & (DRIVER_VIDEO_MASK | DRIVER_AUDIO_MASK))
+      if (input_st && (input_st->flags & INP_FLAG_NONBLOCKING))
+         driver_set_nonblock_state();
+
+   /* Initialize LED driver */
+   if (flags & DRIVER_LED_MASK)
+      led_driver_init(settings->arrays.led_driver);
+
+   /* Initialize MIDI driver */
+   if (flags & DRIVER_MIDI_MASK)
+      midi_driver_init(settings);
+
+#ifdef HAVE_LAKKA
+   cpu_scaling_driver_init();
+#endif
+
+#ifdef HAVE_MENU
+   srand((unsigned)time(NULL));
+#endif
+}
+
+void driver_uninit(int flags, enum driver_lifetime_flags lifetime_flags)
+{
+   runloop_state_t *runloop_st      = runloop_state_get_ptr();
+   video_driver_state_t *video_st   = video_state_get_ptr();
+   camera_driver_state_t *camera_st = camera_state_get_ptr();
+#if defined(HAVE_GFX_WIDGETS)
+   dispgfx_widget_t *p_dispwidget   = dispwidget_get_ptr();
+#endif
+
+   DRIVER_FLAGS_NORMALIZE(flags);
+
+   if (!(lifetime_flags & DRIVER_LIFETIME_RESET)
+         || (flags & DRIVER_MENU_MASK))
+   {
+      core_info_deinit_list();
+      core_info_free_current_core();
+   }
+
+#ifdef HAVE_THREADS
+   /* Wait for the video thread to finish any pending frame before
+    * freeing GPU resources owned by the menu driver and widgets.
+    * Without this barrier, the video thread can be mid-render on
+    * frame N-1 while the main thread frees textures/fonts that
+    * the in-flight frame still references, producing
+    * use-after-free crashes on D3D12/Vulkan under threaded video.
+    *
+    * The wrapper decides, not the setting: turning threaded video
+    * off clears the setting before this runs.
+    *
+    * No-op when threaded video is not active. */
+   if (     (flags & (DRIVER_VIDEO_AND_INPUT_MASK | DRIVER_MENU_MASK))
+         && video_st->thread_wrapper_active)
+      video_thread_wait_idle();
+#endif
+
+#if defined(HAVE_GFX_WIDGETS)
+   /* This absolutely has to be done before video_driver_free_internal()
+    * is called/completes, otherwise certain menu drivers
+    * (e.g. Vulkan) will segfault */
+   if (     (flags & (DRIVER_VIDEO_MASK | DRIVER_MENU_MASK))
+         && (p_dispwidget->flags & DISPGFX_WIDGET_FLAG_INITED))
+   {
+      gfx_widgets_deinit(p_dispwidget->persisting);
+      p_dispwidget->active = false;
+   }
+#endif
+
+#ifdef HAVE_MENU
+   if (flags & DRIVER_MENU_MASK)
+   {
+#ifdef HAVE_LIBRETRODB
+      menu_explore_context_deinit();
+#endif
+      menu_contentless_cores_context_deinit();
+
+#ifdef HAVE_CHEEVOS
+      rcheevos_menu_reset_badges();
+#endif
+
+      menu_driver_ctl(RARCH_MENU_CTL_DEINIT, NULL);
+   }
+   else if (flags & DRIVER_VIDEO_MASK)
+   {
+      /* Video-only teardown (VIDEO_REINIT network command, CRT
+       * switch): the video driver instance every menu font's cached
+       * driver pointer refers to is about to be freed, but without
+       * DRIVER_MENU_MASK nothing released those fonts/textures and
+       * nothing rebuilt them on the way back up - the next menu
+       * frame then flushed a font block against the freed instance
+       * (observed as a use-after-free in
+       * gl2_raster_font_setup_viewport on Android).
+       *
+       * Release just the menu's GPU-held resources here; menu state
+       * itself persists exactly as it does across a full reinit
+       * (MENU_ST_FLAG_DATA_OWN). drivers_init() mirrors this with a
+       * bare context_reset once the new video driver is up. Runs
+       * after the video_thread_wait_idle() barrier above, so no
+       * in-flight threaded frame still references the resources
+       * being freed. */
+      struct menu_state *menu_st = menu_state_get_ptr();
+      if (     menu_st->driver_ctx
+            && menu_st->driver_ctx->context_destroy)
+         menu_st->driver_ctx->context_destroy(menu_st->userdata);
+      gfx_thumbnail_anim_worker_deinit();
+   }
+#endif
+
+   if ((flags & DRIVER_LOCATION_MASK))
+      uninit_location(&runloop_st->system, &location_driver_st);
+
+   if ((flags & DRIVER_CAMERA_MASK))
+   {
+      if (camera_st->data && camera_st->driver)
+      {
+         if (camera_st->cb.deinitialized)
+            camera_st->cb.deinitialized();
+
+         if (camera_st->driver->free)
+            camera_st->driver->free(camera_st->data);
+      }
+
+      camera_st->data = NULL;
+      runloop_frame_work_set(RUNLOOP_WORK_CAMERA, false);
+   }
+
+#ifdef HAVE_BLUETOOTH
+   if ((flags & DRIVER_BLUETOOTH_MASK))
+      bluetooth_driver_ctl(RARCH_BLUETOOTH_CTL_DEINIT, NULL);
+#endif
+#ifdef HAVE_WIFI
+   if ((flags & DRIVER_WIFI_MASK))
+      wifi_driver_ctl(RARCH_WIFI_CTL_DEINIT, NULL);
+#endif
+
+   if (flags & DRIVER_LED_MASK)
+      led_driver_free();
+
+   if (flags & DRIVER_VIDEO_AND_INPUT_MASK)
+   {
+      /* video_driver_free_internal() releases driver memory the
+       * cached frame can point into (a lent software framebuffer),
+       * so retire while that memory is still mapped. */
+      video_driver_cached_frame_retire();
+      /* An input driver that can be left running stays, when the
+       * video driver is coming straight back: a restart, or content
+       * loaded or closed. */
+      input_driver_keep_for_video_restart(
+               (lifetime_flags & (DRIVER_LIFETIME_RESET
+                                | DRIVER_LIFETIME_SESSION_SWITCH))
+            && (flags & DRIVER_VIDEO_MASK),
+            video_st->data);
+      video_driver_free_internal();
+#ifdef HAVE_THREADS
+#ifndef RETRO_ATOMIC_HAS_PTR
+      /* The volatile-backend title fallback's lock - the only
+       * backend on which a display lock exists at all. */
+      slock_free(video_st->display_lock);
+      video_st->display_lock      = NULL;
+#endif
+#endif
+      video_st->data              = NULL;
+   }
+
+   if (flags & DRIVER_AUDIO_MASK)
+   {
+      /* Content loaded or closed: the device is kept for drivers_init()
+       * to take back, when it would open the same one. */
+      audio_driver_keep_device(
+            (lifetime_flags & DRIVER_LIFETIME_SESSION_SWITCH) != 0);
+      if (lifetime_flags & (DRIVER_LIFETIME_RESET
+                         | DRIVER_LIFETIME_SESSION_SWITCH))
+         audio_driver_deinit_for_reinit();
+      else
+         audio_driver_deinit();
+   }
+
+   /* (a driver kept across the restart keeps its data) */
+   if (     (flags & DRIVER_INPUT_MASK)
+         && !input_state_get_ptr()->kept_driver)
+      input_state_get_ptr()->current_data = NULL;
+
+   if ((flags & DRIVER_AUDIO_MASK))
+      audio_state_get_ptr()->context_audio_data = NULL;
+
+#ifdef HAVE_MICROPHONE
+   if (flags & DRIVER_MICROPHONE_MASK)
+      microphone_driver_deinit(lifetime_flags & DRIVER_LIFETIME_RESET);
+#endif
+
+   /* The core's request outlives this: a staged content load frees
+    * the drivers after the new core has asked, and drivers_init
+    * reopens for it. The request ends with the core's unload. */
+   if (flags & DRIVER_MIDI_MASK)
+      midi_driver_free();
+
+#ifdef HAVE_LAKKA
+   cpu_scaling_driver_free();
+#endif
+#ifdef HAVE_LAKKA_SWITCH
+   r2p_deinit();
+#endif
+}
+
+static void retroarch_deinit_drivers(struct retro_callbacks *cbs)
+{
+   input_driver_state_t *input_st  = input_state_get_ptr();
+   video_driver_state_t *video_st  = video_state_get_ptr();
+   camera_driver_state_t *camera_st= camera_state_get_ptr();
+   location_driver_state_t
+      *location_st                 = location_state_get_ptr();
+   runloop_state_t     *runloop_st = runloop_state_get_ptr();
+#if defined(HAVE_GFX_WIDGETS)
+   /* Tear down display widgets no matter what
+    * in case the handle is lost in the threaded
+    * video driver in the meantime
+    * (breaking video_driver_has_widgets) */
+   dispgfx_widget_t *p_dispwidget  = dispwidget_get_ptr();
+   if (p_dispwidget->flags & DISPGFX_WIDGET_FLAG_INITED)
+   {
+#ifdef HAVE_THREADS
+      /* Same barrier as driver_uninit(): no frame still drawing them */
+      video_thread_wait_idle();
+#endif
+      gfx_widgets_deinit(p_dispwidget->persisting);
+      p_dispwidget->active         = false;
+   }
+#endif
+
+#if defined(HAVE_MODELINE)
+   /* Switchres deinit */
+   if (retro_atomic_load_acquire_int(&video_st->crt_switching_active))
+      crt_destroy_modes(&video_st->crt_switch_st);
+#endif
+
+   /* Video */
+   video_display_server_destroy();
+
+   video_st->main_flags &= ~VIDEO_FLAG_ACTIVE;
+   video_driver_modify_disp_flags(0,
+         VIDEO_FLAG_USE_RGBA    |
+         VIDEO_FLAG_HDR_SUPPORT | VIDEO_FLAG_CACHE_CONTEXT);
+   video_driver_cache_context_ack_clear();
+   video_st->record_gpu_buffer          = NULL;
+   video_st->current_video              = NULL;
+   video_driver_cached_frame_invalidate();
+
+   /* Audio */
+   AUDIO_FLAGS_CLEAR(audio_state_get_ptr(), AUDIO_FLAG_ACTIVE);
+   audio_state_get_ptr()->current_audio = NULL;
+
+   if (input_st)
+   {
+      /* Input */
+      input_st->flags &= ~(INP_FLAG_KB_LINEFEED_ENABLE
+                         | INP_FLAG_BLOCK_HOTKEY
+                         | INP_FLAG_BLOCK_LIBRETRO_INPUT
+                         | INP_FLAG_NONBLOCKING);
+
+      memset(&input_st->turbo_btns, 0, sizeof(turbo_buttons_t));
+      memset(&input_st->hold_btns, 0, sizeof(hold_buttons_t));
+      memset(&input_st->analog_requested, 0,
+         sizeof(input_st->analog_requested));
+      memset(&input_st->touchpad_requested, 0,
+         sizeof(input_st->touchpad_requested));
+      input_st->current_driver           = NULL;
+   }
+
+#ifdef HAVE_MENU
+   menu_driver_destroy(
+         menu_state_get_ptr());
+#endif
+   location_st->active                              = false;
+   location_st->driver                              = NULL;
+
+   /* Camera */
+   camera_st->active                                = false;
+   camera_st->driver                                = NULL;
+   camera_st->data                                  = NULL;
+
+#ifdef HAVE_BLUETOOTH
+   bluetooth_driver_ctl(RARCH_BLUETOOTH_CTL_DESTROY, NULL);
+#endif
+#ifdef HAVE_WIFI
+   wifi_driver_ctl(RARCH_WIFI_CTL_DESTROY, NULL);
+#endif
+
+   cbs->frame_cb                    = retro_frame_null;
+   cbs->poll_cb                     = retro_input_poll_null;
+   cbs->sample_cb                   = NULL;
+   cbs->sample_batch_cb             = NULL;
+   cbs->state_cb                    = NULL;
+
+   runloop_st->current_core.flags  &= ~RETRO_CORE_FLAG_INITED;
+}
+
+bool driver_ctl(enum driver_ctl_state state, void *data)
+{
+   driver_ctx_info_t      *drv = (driver_ctx_info_t*)data;
+
+   switch (state)
+   {
+      case RARCH_DRIVER_CTL_SET_REFRESH_RATE:
+         {
+            float *hz                     = (float*)data;
+            audio_driver_state_t
+               *audio_st                  = audio_state_get_ptr();
+            settings_t *settings          = config_get_ptr();
+            runloop_state_t *runloop_st   = runloop_state_get_ptr();
+            video_driver_state_t*video_st = video_state_get_ptr();
+            unsigned
+               audio_output_sample_rate   = settings->uints.audio_output_sample_rate;
+
+            video_monitor_set_refresh_rate(*hz);
+
+            /* With no content loaded it is the dummy core that is
+             * running, and its retro_get_system_av_info() reports
+             * timing.fps as whatever GET_TARGET_REFRESH_RATE answered
+             * at core init - that is, the display rate.  Nothing
+             * re-queries it when the display rate changes afterwards,
+             * so it goes stale the moment the user switches mode.
+             *
+             * That matters because audio_driver_menu_sample() emits
+             * timing.sample_rate / timing.fps frames per runloop
+             * iteration, while the runloop is driven at the *actual*
+             * display rate.  A stale fps scales the menu audio feed by
+             * (real rate / stale fps): after a 120 Hz -> 60 Hz switch
+             * it is halved, so the mixer - which audio_driver_flush()
+             * advances by the post-resample output frame count -
+             * starves and menu BGM garbles.
+             *
+             * driver_adjust_system_rates() below cannot repair this,
+             * because it derives audio_st->input from this very
+             * timing.fps and so re-derives the same wrong answer.
+             *
+             * Only the dummy core gets this treatment: a real core's
+             * fps is a property of the emulated system, not of the
+             * display, and must never be overwritten here. */
+            if (     *hz > 0.0f
+                  && runloop_st->current_core_type == CORE_TYPE_DUMMY)
+               video_st->av_info.timing.fps = *hz;
+
+            driver_adjust_system_rates(runloop_st, video_st, settings, NULL);
+
+            /* Use the input rate adjusted for the new display timing. */
+            audio_st->src_ratio_orig   =
+            audio_st->src_ratio_curr   =
+            (double)audio_output_sample_rate / audio_st->input;
+
+            /* driver_adjust_system_rates may have updated audio_st->input
+             * for the new refresh rate; recompute the DRC threshold so
+             * it tracks one frame's worth of samples at the new rate. */
+            audio_driver_update_drc_threshold(audio_st);
+         }
+         break;
+      case RARCH_DRIVER_CTL_FIND_FIRST:
+         if (!drv)
+            return false;
+         find_driver_nonempty(drv->label, 0, drv->s, drv->len);
+         break;
+      case RARCH_DRIVER_CTL_FIND_LAST:
+         if (!drv)
+            return false;
+         driver_find_last(drv->label, drv->s, drv->len);
+         break;
+      case RARCH_DRIVER_CTL_FIND_PREV:
+         if (!drv)
+            return false;
+         return (bool)driver_find_prev(drv->label, drv->s, drv->len);
+      case RARCH_DRIVER_CTL_FIND_NEXT:
+         if (!drv)
+            return false;
+         return (bool)driver_find_next(drv->label, drv->s, drv->len);
+      case RARCH_DRIVER_CTL_NONE:
+      default:
+         break;
+   }
+
+   return true;
+}
+
+access_state_t *access_state_get_ptr(void)
+{
+   return &access_state_st;
+}
+
+uint32_t retroarch_get_flags(void)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   return p_rarch->flags;
+}
+
+void retroarch_user_dirs_hold(void)
+{
+   rarch_st.flags |= RARCH_FLAGS_USER_DIRS_HELD;
+}
+
+void retroarch_user_dirs_release(void)
+{
+   settings_t *settings = config_get_ptr();
+
+   if (!(rarch_st.flags & RARCH_FLAGS_USER_DIRS_HELD))
+      return;
+   rarch_st.flags &= ~RARCH_FLAGS_USER_DIRS_HELD;
+   if (!settings)
+      return;
+
+   {
+      char new_path[PATH_MAX_LENGTH];
+      fill_pathname_join_special(new_path,
+            settings->paths.directory_playlist,
+            FILE_PATH_BUILTIN, sizeof(new_path));
+      if (!path_is_directory(new_path))
+         path_mkdir(new_path);
+   }
+
+#ifdef HAVE_MENU
+   retroarch_favorites_init();
+   command_event(CMD_EVENT_HISTORY_INIT, NULL);
+   {
+      struct menu_state *menu_st = menu_state_get_ptr();
+      if (menu_st->driver_ctx && menu_st->driver_ctx->environ_cb)
+         menu_st->driver_ctx->environ_cb(MENU_ENVIRON_RESET_HORIZONTAL_LIST,
+               NULL, menu_st->userdata);
+      menu_st->flags |= MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+   }
+#endif
+}
+
+struct retro_perf_counter **retro_get_perf_counter_rarch(void)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   return p_rarch->perf_counters_rarch;
+}
+
+unsigned retro_get_perf_count_rarch(void)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   return p_rarch->perf_ptr_rarch;
+}
+
+void rarch_perf_register(struct retro_perf_counter *perf)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   if (
+            !runloop_st->perfcnt_enable
+         || perf->registered
+         || p_rarch->perf_ptr_rarch >= MAX_COUNTERS
+      )
+      return;
+
+   p_rarch->perf_counters_rarch[p_rarch->perf_ptr_rarch++] = perf;
+   perf->registered = true;
+}
+
+struct string_list *dir_list_new_special(const char *input_dir,
+      enum dir_list_type type, const char *filter,
+      bool show_hidden_files)
+{
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+   char ext_shaders[NAME_MAX_LENGTH];
+#endif
+   char ext_name[16];
+   const char *exts    = NULL;
+   bool recursive      = false;
+
+   switch (type)
+   {
+      case DIR_LIST_AUTOCONFIG:
+         exts = filter;
+         break;
+      case DIR_LIST_CORES:
+         if (!frontend_driver_get_core_extension(ext_name, sizeof(ext_name)))
+            return NULL;
+         exts = ext_name;
+         break;
+      case DIR_LIST_RECURSIVE:
+         recursive = true;
+         /* fall-through */
+      case DIR_LIST_CORE_INFO:
+         {
+            core_info_list_t *list = NULL;
+            core_info_get_list(&list);
+
+            if (list)
+               exts = list->all_ext;
+         }
+         break;
+      case DIR_LIST_SHADERS:
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+         {
+            gfx_ctx_flags_t flags;
+            size_t _len          = 0;
+            flags.flags          = 0;
+            ext_shaders[0]       = '\0';
+
+            video_context_driver_get_flags(&flags);
+
+            if (BIT32_GET(flags.flags, GFX_CTX_FLAGS_SHADERS_CG))
+               _len    += strlcpy_lit(ext_shaders + _len, "cgp", sizeof(ext_shaders) - _len);
+
+            if (BIT32_GET(flags.flags, GFX_CTX_FLAGS_SHADERS_GLSL))
+            {
+               if (_len > 0)
+                  _len += strlcpy_lit(ext_shaders + _len, "|",     sizeof(ext_shaders) - _len);
+               _len    += strlcpy_lit(ext_shaders + _len, "glslp", sizeof(ext_shaders) - _len);
+            }
+
+            if (BIT32_GET(flags.flags, GFX_CTX_FLAGS_SHADERS_SLANG))
+            {
+               if (_len > 0)
+                  _len += strlcpy_lit(ext_shaders + _len, "|",      sizeof(ext_shaders) - _len);
+               strlcpy_lit(ext_shaders + _len, "slangp", sizeof(ext_shaders) - _len);
+            }
+
+            exts = ext_shaders;
+         }
+         break;
+#else
+         return NULL;
+#endif
+      case DIR_LIST_COLLECTIONS:
+         exts = "lpl";
+         break;
+      case DIR_LIST_DATABASES:
+         exts = "rdb";
+         break;
+      case DIR_LIST_PLAIN:
+         exts = filter;
+         break;
+      case DIR_LIST_NONE:
+      default:
+         return NULL;
+   }
+
+   return dir_list_new(input_dir, exts, false,
+         show_hidden_files,
+         type == DIR_LIST_CORE_INFO, recursive);
+}
+
+static struct string_list *string_list_new_special(
+      enum string_list_type type, size_t *len)
+{
+   int i;
+   union string_list_elem_attr attr;
+   struct string_list *s = string_list_new();
+
+   if (!s)
+      return NULL;
+
+   attr.i = 0;
+   *len   = 0;
+
+   switch (type)
+   {
+      case STRING_LIST_MENU_DRIVERS:
+#ifdef HAVE_MENU
+         for (i = 0; menu_ctx_drivers[i]; i++)
+         {
+            const char *opt  = menu_ctx_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            /* Don't allow the user to set menu driver to "null" using the UI.
+             * Can prevent the user from locking him/herself out of the program. */
+            if (string_is_not_equal(opt, "null"))
+               string_list_append(s, opt, attr);
+         }
+         break;
+#endif
+      case STRING_LIST_CAMERA_DRIVERS:
+         for (i = 0; camera_drivers[i]; i++)
+         {
+            const char *opt  = camera_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_UI_COMPANION_DRIVERS:
+         for (i = 0; ; i++)
+         {
+            const char *opt  = ui_companion_wimp_find_ident(i);
+            if (!opt)
+               break;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_BLUETOOTH_DRIVERS:
+#ifdef HAVE_BLUETOOTH
+         for (i = 0; bluetooth_drivers[i]; i++)
+         {
+            const char *opt  = bluetooth_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+#endif
+      case STRING_LIST_WIFI_DRIVERS:
+#ifdef HAVE_WIFI
+         for (i = 0; wifi_drivers[i]; i++)
+         {
+            const char *opt  = wifi_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+#endif
+      case STRING_LIST_LOCATION_DRIVERS:
+         for (i = 0; location_drivers[i]; i++)
+         {
+            const char *opt  = location_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_AUDIO_DRIVERS:
+         for (i = 0; audio_drivers[i]; i++)
+         {
+            const char *opt  = audio_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+#ifdef HAVE_MICROPHONE
+      case STRING_LIST_MICROPHONE_DRIVERS:
+         for (i = 0; microphone_drivers[i]; i++)
+         {
+            const char *opt  = microphone_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+#endif
+      case STRING_LIST_AUDIO_RESAMPLER_DRIVERS:
+         for (i = 0; audio_resampler_driver_find_handle(i); i++)
+         {
+            const char *opt  = audio_resampler_driver_find_ident(i);
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_VIDEO_DRIVERS:
+         for (i = 0; video_drivers[i]; i++)
+         {
+            const char *opt  = video_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            /* Don't allow the user to set video driver to "null" using the UI.
+             * Can prevent the user from locking him/herself out of the program. */
+            if (string_is_not_equal(opt, "null"))
+               string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_INPUT_DRIVERS:
+         for (i = 0; input_drivers[i]; i++)
+         {
+            const char *opt  = input_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            /* Don't allow the user to set input driver to "null" using the UI.
+             * Can prevent the user from locking him/herself out of the program. */
+            if (string_is_not_equal(opt, "null"))
+               string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_INPUT_HID_DRIVERS:
+#ifdef HAVE_HID
+         for (i = 0; hid_drivers[i]; i++)
+         {
+            const char *opt  = hid_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            /* Don't allow the user to set input HID driver to "null" using the UI.
+             * Can prevent the user from locking him/herself out of the program. */
+            if (string_is_not_equal(opt, "null"))
+               string_list_append(s, opt, attr);
+         }
+#endif
+         break;
+      case STRING_LIST_INPUT_JOYPAD_DRIVERS:
+         for (i = 0; joypad_drivers[i]; i++)
+         {
+            const char *opt  = joypad_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            /* Don't allow the user to set input joypad driver to "null" using the UI.
+             * Can prevent the user from locking him/herself out of the program. */
+            if (string_is_not_equal(opt, "null"))
+               string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_RECORD_DRIVERS:
+         for (i = 0; record_drivers[i]; i++)
+         {
+            const char *opt  = record_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_MIDI_DRIVERS:
+         for (i = 0; midi_driver_find_handle(i); i++)
+         {
+            const char *opt  = midi_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+         break;
+      case STRING_LIST_CLOUD_SYNC_DRIVERS:
+#ifdef HAVE_CLOUDSYNC
+         for (i = 0; cloud_sync_drivers[i]; i++)
+         {
+            const char *opt  = cloud_sync_drivers[i]->ident;
+            *len            += strlen(opt) + 1;
+
+            string_list_append(s, opt, attr);
+         }
+#endif
+         break;
+#ifdef HAVE_LAKKA
+      case STRING_LIST_TIMEZONES:
+         {
+            const char *opt  = DEFAULT_TIMEZONE;
+            *len            += STRLEN_CONST(DEFAULT_TIMEZONE) + 1;
+            string_list_append(s, opt, attr);
+
+            FILE *zones_file = popen("grep -v ^# /usr/share/zoneinfo/zone.tab | "
+                                     "cut -f3 | "
+                                     "sort", "r");
+
+            if (zones_file)
+            {
+               char zone_desc[TIMEZONE_LENGTH];
+               while (fgets(zone_desc, TIMEZONE_LENGTH, zones_file))
+               {
+                  size_t _len = strlen(zone_desc);
+
+                  if (_len > 0)
+                     if (zone_desc[--_len] == '\n')
+                        zone_desc[_len] = '\0';
+
+                  if (zone_desc && zone_desc[0] != '\0')
+                  {
+                     const char *opt  = zone_desc;
+                     *len            += strlen(opt) + 1;
+                     string_list_append(s, opt, attr);
+                  }
+               }
+               pclose(zones_file);
+            }
+         }
+         break;
+#endif
+      case STRING_LIST_NONE:
+      default:
+         string_list_free(s);
+         s    = NULL;
+         return NULL;
+   }
+
+   return s;
+}
+
+const char *char_list_new_special(enum string_list_type type, void *data)
+{
+   size_t _len = 0;
+   struct string_list *s = string_list_new_special(type, &_len);
+   char         *opt     = (_len > 0) ? (char*)calloc(_len, sizeof(char)): NULL;
+   if (opt && s)
+      string_list_join_concat(opt, _len, s, "|");
+   string_list_free(s);
+   s = NULL;
+   return opt;
+}
+
+char *path_get_ptr(enum rarch_path_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+
+   switch (type)
+   {
+      case RARCH_PATH_CONTENT:
+         return p_rarch->path_content;
+      case RARCH_PATH_DEFAULT_SHADER_PRESET:
+         return p_rarch->path_default_shader_preset;
+      case RARCH_PATH_BASENAME:
+         return runloop_st->runtime_content_path_basename;
+      case RARCH_PATH_CORE_OPTIONS:
+         if (!path_is_empty(RARCH_PATH_CORE_OPTIONS))
+            return p_rarch->path_core_options_file;
+         break;
+      case RARCH_PATH_SUBSYSTEM:
+         return runloop_st->subsystem_path;
+      case RARCH_PATH_CONFIG:
+         if (!path_is_empty(RARCH_PATH_CONFIG))
+            return p_rarch->path_config_file;
+         break;
+      case RARCH_PATH_CONFIG_DEFAULT:
+         if (!path_is_empty(RARCH_PATH_CONFIG_DEFAULT))
+            return p_rarch->path_config_default_file;
+         break;
+      case RARCH_PATH_CONFIG_APPEND:
+         if (!path_is_empty(RARCH_PATH_CONFIG_APPEND))
+            return p_rarch->path_config_append_file;
+         break;
+      case RARCH_PATH_CONFIG_OVERRIDE:
+         if (!path_is_empty(RARCH_PATH_CONFIG_OVERRIDE))
+            return p_rarch->path_config_override_file;
+         break;
+      case RARCH_PATH_CORE:
+         return p_rarch->path_libretro;
+      case RARCH_PATH_CORE_LAST:
+         return p_rarch->path_libretro_last;
+      case RARCH_PATH_NONE:
+      case RARCH_PATH_NAMES:
+         break;
+   }
+
+   return NULL;
+}
+
+const char *path_get(enum rarch_path_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+
+   switch (type)
+   {
+      case RARCH_PATH_CONTENT:
+         return p_rarch->path_content;
+      case RARCH_PATH_DEFAULT_SHADER_PRESET:
+         return p_rarch->path_default_shader_preset;
+      case RARCH_PATH_CORE_OPTIONS:
+         if (!path_is_empty(RARCH_PATH_CORE_OPTIONS))
+            return p_rarch->path_core_options_file;
+         break;
+      case RARCH_PATH_CONFIG:
+         if (!path_is_empty(RARCH_PATH_CONFIG))
+            return p_rarch->path_config_file;
+         break;
+      case RARCH_PATH_CONFIG_DEFAULT:
+         if (!path_is_empty(RARCH_PATH_CONFIG_DEFAULT))
+            return p_rarch->path_config_default_file;
+         break;
+      case RARCH_PATH_CONFIG_APPEND:
+         if (!path_is_empty(RARCH_PATH_CONFIG_APPEND))
+            return p_rarch->path_config_append_file;
+         break;
+      case RARCH_PATH_CONFIG_OVERRIDE:
+         if (!path_is_empty(RARCH_PATH_CONFIG_OVERRIDE))
+            return p_rarch->path_config_override_file;
+         break;
+      case RARCH_PATH_CORE:
+         return p_rarch->path_libretro;
+      case RARCH_PATH_CORE_LAST:
+         return p_rarch->path_libretro_last;
+      case RARCH_PATH_NONE:
+      case RARCH_PATH_NAMES:
+         break;
+      case RARCH_PATH_BASENAME:
+         return runloop_state_get_ptr()->runtime_content_path_basename;
+      case RARCH_PATH_SUBSYSTEM:
+         return runloop_state_get_ptr()->subsystem_path;
+   }
+
+   return NULL;
+}
+
+size_t path_get_realsize(enum rarch_path_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+
+   switch (type)
+   {
+      case RARCH_PATH_CONTENT:
+         return sizeof(p_rarch->path_content);
+      case RARCH_PATH_DEFAULT_SHADER_PRESET:
+         return sizeof(p_rarch->path_default_shader_preset);
+      case RARCH_PATH_CORE_OPTIONS:
+         return sizeof(p_rarch->path_core_options_file);
+      case RARCH_PATH_CONFIG:
+         return sizeof(p_rarch->path_config_file);
+      case RARCH_PATH_CONFIG_DEFAULT:
+         return sizeof(p_rarch->path_config_default_file);
+      case RARCH_PATH_CONFIG_APPEND:
+         return sizeof(p_rarch->path_config_append_file);
+      case RARCH_PATH_CONFIG_OVERRIDE:
+         return sizeof(p_rarch->path_config_override_file);
+      case RARCH_PATH_CORE:
+         return sizeof(p_rarch->path_libretro);
+      case RARCH_PATH_CORE_LAST:
+         return sizeof(p_rarch->path_libretro_last);
+      case RARCH_PATH_NONE:
+      case RARCH_PATH_NAMES:
+         break;
+      case RARCH_PATH_BASENAME:
+         return sizeof(runloop_state_get_ptr()->runtime_content_path_basename);
+      case RARCH_PATH_SUBSYSTEM:
+         return sizeof(runloop_state_get_ptr()->subsystem_path);
+   }
+
+   return 0;
+}
+
+bool path_set(enum rarch_path_type type, const char *path)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   runloop_state_t *runloop_st = NULL;
+
+   if (!path)
+      return false;
+
+   switch (type)
+   {
+      case RARCH_PATH_NAMES:
+         runloop_path_set_basename(path);
+         runloop_path_set_names();
+         runloop_path_set_redirect(config_get_ptr(), p_rarch->dir_savefile,
+               p_rarch->dir_savestate);
+         break;
+      case RARCH_PATH_CORE:
+         if (path != p_rarch->path_libretro)
+            strlcpy(p_rarch->path_libretro, path,
+                  sizeof(p_rarch->path_libretro));
+         break;
+      case RARCH_PATH_CORE_LAST:
+         if (path != p_rarch->path_libretro_last)
+            strlcpy(p_rarch->path_libretro_last, path,
+                  sizeof(p_rarch->path_libretro_last));
+         break;
+      case RARCH_PATH_DEFAULT_SHADER_PRESET:
+         if (path != p_rarch->path_default_shader_preset)
+            strlcpy(p_rarch->path_default_shader_preset, path,
+                  sizeof(p_rarch->path_default_shader_preset));
+         break;
+      case RARCH_PATH_CONFIG:
+         if (path != p_rarch->path_config_file)
+            strlcpy(p_rarch->path_config_file, path,
+                  sizeof(p_rarch->path_config_file));
+         break;
+      case RARCH_PATH_CONFIG_DEFAULT:
+         if (path != p_rarch->path_config_default_file)
+            strlcpy(p_rarch->path_config_default_file, path,
+                  sizeof(p_rarch->path_config_default_file));
+         break;
+      case RARCH_PATH_CONFIG_APPEND:
+         if (path != p_rarch->path_config_append_file)
+            strlcpy(p_rarch->path_config_append_file, path,
+                  sizeof(p_rarch->path_config_append_file));
+         break;
+      case RARCH_PATH_CONFIG_OVERRIDE:
+         if (path != p_rarch->path_config_override_file)
+            strlcpy(p_rarch->path_config_override_file, path,
+                  sizeof(p_rarch->path_config_override_file));
+         break;
+      case RARCH_PATH_CORE_OPTIONS:
+         if (path != p_rarch->path_core_options_file)
+            strlcpy(p_rarch->path_core_options_file, path,
+                  sizeof(p_rarch->path_core_options_file));
+         break;
+      case RARCH_PATH_CONTENT:
+         if (path != p_rarch->path_content)
+            strlcpy(p_rarch->path_content, path,
+                  sizeof(p_rarch->path_content));
+         break;
+      case RARCH_PATH_NONE:
+         break;
+      case RARCH_PATH_BASENAME:
+         runloop_st = runloop_state_get_ptr();
+         if (path != runloop_st->runtime_content_path_basename)
+            strlcpy(runloop_st->runtime_content_path_basename, path,
+                  sizeof(runloop_st->runtime_content_path_basename));
+         break;
+      case RARCH_PATH_SUBSYSTEM:
+         runloop_st = runloop_state_get_ptr();
+         if (path != runloop_st->subsystem_path)
+            strlcpy(runloop_st->subsystem_path, path,
+                  sizeof(runloop_st->subsystem_path));
+         break;
+   }
+
+   return true;
+}
+
+bool path_is_empty(enum rarch_path_type type)
+{
+   const char *a = NULL;
+   struct rarch_state *p_rarch = &rarch_st;
+
+   switch (type)
+   {
+      case RARCH_PATH_DEFAULT_SHADER_PRESET:
+         if (!*p_rarch->path_default_shader_preset)
+            return true;
+         break;
+      case RARCH_PATH_CONFIG:
+         if (!*p_rarch->path_config_file)
+            return true;
+         break;
+      case RARCH_PATH_CONFIG_DEFAULT:
+         if (!*p_rarch->path_config_default_file)
+            return true;
+         break;
+      case RARCH_PATH_CONFIG_APPEND:
+         if (!*p_rarch->path_config_append_file)
+            return true;
+         break;
+      case RARCH_PATH_CONFIG_OVERRIDE:
+         if (!*p_rarch->path_config_override_file)
+            return true;
+         break;
+      case RARCH_PATH_CORE_OPTIONS:
+         if (!*p_rarch->path_core_options_file)
+            return true;
+         break;
+      case RARCH_PATH_CONTENT:
+         if (!*p_rarch->path_content)
+            return true;
+         break;
+      case RARCH_PATH_CORE:
+         if (!*p_rarch->path_libretro)
+            return true;
+         break;
+      case RARCH_PATH_CORE_LAST:
+         if (!*p_rarch->path_libretro_last)
+            return true;
+         break;
+      case RARCH_PATH_BASENAME:
+         a = runloop_state_get_ptr()->runtime_content_path_basename;
+         if (!a || !*a)
+            return true;
+         break;
+      case RARCH_PATH_SUBSYSTEM:
+         a = runloop_state_get_ptr()->subsystem_path;
+         if (!a || !*a)
+            return true;
+         break;
+      case RARCH_PATH_NONE:
+      case RARCH_PATH_NAMES:
+         break;
+   }
+
+   return false;
+}
+
+void path_clear(enum rarch_path_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   runloop_state_t *runloop_st = NULL;
+
+   switch (type)
+   {
+      case RARCH_PATH_CONTENT:
+         *p_rarch->path_content = '\0';
+         break;
+      case RARCH_PATH_CORE:
+         *p_rarch->path_libretro = '\0';
+         break;
+      case RARCH_PATH_CORE_LAST:
+         *p_rarch->path_libretro_last = '\0';
+         break;
+      case RARCH_PATH_CORE_OPTIONS:
+         *p_rarch->path_core_options_file = '\0';
+         break;
+      case RARCH_PATH_CONFIG:
+         *p_rarch->path_config_file = '\0';
+         break;
+      case RARCH_PATH_CONFIG_DEFAULT:
+         *p_rarch->path_config_default_file = '\0';
+         break;
+      case RARCH_PATH_CONFIG_APPEND:
+         *p_rarch->path_config_append_file = '\0';
+         break;
+      case RARCH_PATH_CONFIG_OVERRIDE:
+         *p_rarch->path_config_override_file = '\0';
+         break;
+      case RARCH_PATH_DEFAULT_SHADER_PRESET:
+         *p_rarch->path_default_shader_preset = '\0';
+         break;
+      case RARCH_PATH_NONE:
+      case RARCH_PATH_NAMES:
+         break;
+      case RARCH_PATH_BASENAME:
+         runloop_st = runloop_state_get_ptr();
+         *runloop_st->runtime_content_path_basename = '\0';
+         break;
+      case RARCH_PATH_SUBSYSTEM:
+         runloop_st = runloop_state_get_ptr();
+         *runloop_st->subsystem_path = '\0';
+         break;
+   }
+}
+
+static void path_clear_all(void)
+{
+   path_clear(RARCH_PATH_CONTENT);
+   path_clear(RARCH_PATH_CORE);
+   path_clear(RARCH_PATH_CORE_LAST);
+   path_clear(RARCH_PATH_CORE_OPTIONS);
+   path_clear(RARCH_PATH_CONFIG);
+   path_clear(RARCH_PATH_CONFIG_DEFAULT);
+   path_clear(RARCH_PATH_CONFIG_APPEND);
+   path_clear(RARCH_PATH_CONFIG_OVERRIDE);
+   path_clear(RARCH_PATH_DEFAULT_SHADER_PRESET);
+   path_clear(RARCH_PATH_BASENAME);
+   path_clear(RARCH_PATH_SUBSYSTEM);
+}
+
+static void ram_state_to_file(void)
+{
+   char state_path[PATH_MAX_LENGTH];
+
+   if (!content_ram_state_pending())
+      return;
+
+   state_path[0] = '\0';
+
+   if (runloop_get_current_savestate_path(state_path, sizeof(state_path)))
+      command_event(CMD_EVENT_RAM_STATE_TO_FILE, state_path);
+}
+
+enum rarch_content_type path_is_media_type(const char *path)
+{
+   const char *ext;
+   char ext_lower[16];
+
+   if (!path || !*path)
+      return RARCH_CONTENT_NONE;
+
+   /* Fast streaming-protocol check: switch on first char to avoid
+    * testing all prefixes linearly. Only fall through on match. */
+   switch (path[0])
+   {
+      case 'u':
+         if (string_starts_with_size(path, "udp://", STRLEN_CONST("udp://")))
+            return RARCH_CONTENT_MOVIE;
+         break;
+      case 'h':
+         if (   string_starts_with_size(path, "http://",  STRLEN_CONST("http://"))
+             || string_starts_with_size(path, "https://", STRLEN_CONST("https://")))
+            return RARCH_CONTENT_MOVIE;
+         break;
+      case 't':
+         if (string_starts_with_size(path, "tcp://", STRLEN_CONST("tcp://")))
+            return RARCH_CONTENT_MOVIE;
+         break;
+      case 'r':
+         if (   string_starts_with_size(path, "rtmp://", STRLEN_CONST("rtmp://"))
+             || string_starts_with_size(path, "rtp://",  STRLEN_CONST("rtp://")))
+            return RARCH_CONTENT_MOVIE;
+         break;
+      default:
+         break;
+   }
+
+   ext = path_get_extension(path);
+   if (!ext || !*ext)
+      return RARCH_CONTENT_NONE;
+
+   /* Lowercase the extension into a tiny stack buffer so the
+    * value-table lookup matches the lowercase entries regardless
+    * of what case the filesystem returned (e.g. "MP4" vs "mp4").
+    * Real file extensions are short; truncate at 15 chars. */
+   {
+      size_t i;
+      for (i = 0; i < sizeof(ext_lower) - 1 && ext[i]; i++)
+      {
+         unsigned char c = (unsigned char)ext[i];
+         ext_lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c | 0x20) : (char)c;
+      }
+      ext_lower[i] = '\0';
+   }
+
+   switch (msg_hash_to_file_type(ext_lower))
+   {
+#if defined(HAVE_WEBMPLAYER) && !defined(HAVE_FFMPEG) && !defined(HAVE_MPV)
+      case FILE_TYPE_MKV:
+      case FILE_TYPE_WEBM:
+#ifdef HAVE_RMP4
+      /* the built-in player also handles ISO-BMFF containers */
+      case FILE_TYPE_MP4:
+      case FILE_TYPE_MOV:
+#endif
+         return RARCH_CONTENT_MOVIE;
+#endif
+#if defined(HAVE_FFMPEG) || defined(HAVE_MPV)
+      case FILE_TYPE_OGM:
+      case FILE_TYPE_MKV:
+      case FILE_TYPE_AVI:
+      case FILE_TYPE_MP4:
+      case FILE_TYPE_FLV:
+      case FILE_TYPE_WEBM:
+      case FILE_TYPE_3GP:
+      case FILE_TYPE_3G2:
+      case FILE_TYPE_F4F:
+      case FILE_TYPE_F4V:
+      case FILE_TYPE_MOV:
+      case FILE_TYPE_WMV:
+      case FILE_TYPE_MPG:
+      case FILE_TYPE_MPEG:
+      case FILE_TYPE_VOB:
+      case FILE_TYPE_ASF:
+      case FILE_TYPE_DIVX:
+      case FILE_TYPE_M2P:
+      case FILE_TYPE_M2TS:
+      case FILE_TYPE_PS:
+      case FILE_TYPE_TS:
+      case FILE_TYPE_MXF:
+         return RARCH_CONTENT_MOVIE;
+      case FILE_TYPE_MOVIE_OTHER:
+      case FILE_TYPE_MUSIC_OTHER:
+#ifdef HAVE_FFMPEG
+         /* Only if this build's FFmpeg can open it. */
+         if (!libretro_ffmpeg_ffmpeg_core_supports_extension(ext_lower))
+            return RARCH_CONTENT_NONE;
+#endif
+         return (msg_hash_to_file_type(ext_lower) == FILE_TYPE_MOVIE_OTHER)
+            ? RARCH_CONTENT_MOVIE : RARCH_CONTENT_MUSIC;
+      case FILE_TYPE_WMA:
+      case FILE_TYPE_M4A:
+#endif
+#if defined(HAVE_FFMPEG) || defined(HAVE_MPV) || defined(HAVE_AUDIOMIXER)
+#if !defined(HAVE_AUDIOMIXER) || defined(HAVE_RVORBIS)
+      case FILE_TYPE_OGG:
+#endif
+#if !defined(HAVE_AUDIOMIXER) || defined(HAVE_RMP3)
+      case FILE_TYPE_MP3:
+#endif
+#if !defined(HAVE_AUDIOMIXER) || defined(HAVE_RFLAC)
+      case FILE_TYPE_FLAC:
+#endif
+#if !defined(HAVE_AUDIOMIXER) || defined(HAVE_RWAV)
+      case FILE_TYPE_WAV:
+#endif
+#if !defined(HAVE_AUDIOMIXER) || defined(HAVE_RMODTRACKER)
+      case FILE_TYPE_MOD:
+      case FILE_TYPE_S3M:
+      case FILE_TYPE_XM:
+#endif
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_RAAC) && defined(HAVE_RMP4) \
+      && !defined(HAVE_FFMPEG) && !defined(HAVE_MPV)
+      /* without FFmpeg/MPV (which claim m4a above), the mixer's AAC
+       * path takes it as music */
+      case FILE_TYPE_M4A:
+#endif
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_RAAC)
+      case FILE_TYPE_AAC:
+#endif
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_RAC3)
+      case FILE_TYPE_AC3:
+#endif
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_RLPCM)
+      case FILE_TYPE_LPCM:
+#endif
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_ROPUS)
+      case FILE_TYPE_OPUS:
+#endif
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_RWEBM) \
+      && (defined(HAVE_ROPUS) || defined(HAVE_RVORBIS))
+      case FILE_TYPE_WEBA:
+#endif
+         return RARCH_CONTENT_MUSIC;
+#endif
+#if defined(HAVE_IMAGEVIEWER) || defined(HAVE_MENU)
+      case FILE_TYPE_JPEG:
+      case FILE_TYPE_PNG:
+      case FILE_TYPE_TGA:
+      case FILE_TYPE_BMP:
+      case FILE_TYPE_WEBP:
+         return RARCH_CONTENT_IMAGE;
+#endif
+      default:
+         break;
+   }
+
+   return RARCH_CONTENT_NONE;
+}
+
+/* get size functions */
+
+size_t dir_get_size(enum rarch_dir_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+
+   switch (type)
+   {
+      case RARCH_DIR_SYSTEM:
+         return sizeof(p_rarch->dir_system);
+      case RARCH_DIR_SAVESTATE:
+         return sizeof(p_rarch->dir_savestate);
+      case RARCH_DIR_CURRENT_SAVESTATE:
+         return sizeof(runloop_state_get_ptr()->savestate_dir);
+      case RARCH_DIR_SAVEFILE:
+         return sizeof(p_rarch->dir_savefile);
+      case RARCH_DIR_CURRENT_SAVEFILE:
+         return sizeof(runloop_state_get_ptr()->savefile_dir);
+      case RARCH_DIR_NONE:
+         break;
+   }
+
+   return 0;
+}
+
+/* clear functions */
+
+void dir_clear(enum rarch_dir_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   runloop_state_t *runloop_st = NULL;
+
+   switch (type)
+   {
+      case RARCH_DIR_SAVEFILE:
+         *p_rarch->dir_savefile = '\0';
+         break;
+      case RARCH_DIR_SAVESTATE:
+         *p_rarch->dir_savestate = '\0';
+         break;
+      case RARCH_DIR_SYSTEM:
+         *p_rarch->dir_system = '\0';
+         break;
+      case RARCH_DIR_NONE:
+         break;
+      case RARCH_DIR_CURRENT_SAVEFILE:
+         runloop_st = runloop_state_get_ptr();
+         *runloop_st->savefile_dir = '\0';
+         break;
+      case RARCH_DIR_CURRENT_SAVESTATE:
+         runloop_st = runloop_state_get_ptr();
+         *runloop_st->savestate_dir = '\0';
+         break;
+   }
+}
+
+static void dir_clear_all(void)
+{
+   dir_clear(RARCH_DIR_SYSTEM);
+   dir_clear(RARCH_DIR_SAVEFILE);
+   dir_clear(RARCH_DIR_SAVESTATE);
+}
+
+/* get ptr functions */
+
+char *dir_get_ptr(enum rarch_dir_type type)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+
+   switch (type)
+   {
+      case RARCH_DIR_SAVEFILE:
+         return p_rarch->dir_savefile;
+      case RARCH_DIR_CURRENT_SAVEFILE:
+         return runloop_state_get_ptr()->savefile_dir;
+      case RARCH_DIR_SAVESTATE:
+         return p_rarch->dir_savestate;
+      case RARCH_DIR_CURRENT_SAVESTATE:
+         return runloop_state_get_ptr()->savestate_dir;
+      case RARCH_DIR_SYSTEM:
+         return p_rarch->dir_system;
+      case RARCH_DIR_NONE:
+         break;
+   }
+
+   return NULL;
+}
+
+void dir_set(enum rarch_dir_type type, const char *path)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+   runloop_state_t *runloop_st = NULL;
+
+   switch (type)
+   {
+      case RARCH_DIR_SAVEFILE:
+         strlcpy(p_rarch->dir_savefile, path,
+               sizeof(p_rarch->dir_savefile));
+         break;
+      case RARCH_DIR_SAVESTATE:
+         strlcpy(p_rarch->dir_savestate, path,
+               sizeof(p_rarch->dir_savestate));
+         break;
+      case RARCH_DIR_SYSTEM:
+         strlcpy(p_rarch->dir_system, path,
+               sizeof(p_rarch->dir_system));
+         break;
+      case RARCH_DIR_NONE:
+         break;
+      case RARCH_DIR_CURRENT_SAVEFILE:
+         runloop_st = runloop_state_get_ptr();
+         strlcpy(runloop_st->savefile_dir, path,
+               sizeof(runloop_st->savefile_dir));
+         break;
+      case RARCH_DIR_CURRENT_SAVESTATE:
+         runloop_st = runloop_state_get_ptr();
+         strlcpy(runloop_st->savestate_dir, path,
+               sizeof(runloop_st->savestate_dir));
+         break;
+   }
+}
+
+void dir_check_defaults(const char *custom_ini_path)
+{
+   size_t i;
+
+   /* Early return for people with a custom folder setup
+    * so it doesn't create unnecessary directories */
+   if (  (custom_ini_path && *custom_ini_path)
+       && path_is_valid(custom_ini_path))
+      return;
+
+   for (i = 0; i < DEFAULT_DIR_LAST; i++)
+   {
+      const char *dir_path = g_defaults.dirs[i];
+      char new_path[PATH_MAX_LENGTH];
+
+      if (!dir_path || !*dir_path)
+         continue;
+
+      fill_pathname_expand_special(new_path,
+            dir_path, sizeof(new_path));
+
+      if (!path_is_directory(new_path))
+         path_mkdir(new_path);
+   }
+}
+
+#ifdef __APPLE__
+static void dir_check_config(void)
+{
+   settings_t *settings            = config_get_ptr();
+
+#define ENSURE_DIRECTORY(DIRPATH)               \
+   if (DIRPATH && *DIRPATH)                     \
+      if (!path_is_directory(DIRPATH))          \
+         path_mkdir(DIRPATH)
+
+   /* the order here mimics the order of enum default_dirs */
+   /* TODO: not all of these are necessary/used and many are created on demand, make fewer */
+   ENSURE_DIRECTORY(settings->paths.directory_menu_content);
+   ENSURE_DIRECTORY(settings->paths.directory_core_assets);
+   ENSURE_DIRECTORY(settings->paths.directory_menu_config);
+   ENSURE_DIRECTORY(settings->paths.directory_autoconfig);
+   ENSURE_DIRECTORY(settings->paths.directory_audio_filter);
+   ENSURE_DIRECTORY(settings->paths.directory_video_filter);
+   ENSURE_DIRECTORY(settings->paths.directory_assets);
+#ifdef _3DS
+   ENSURE_DIRECTORY(settings->paths.directory_bottom_assets);
+#endif
+   ENSURE_DIRECTORY(settings->paths.directory_libretro);
+   ENSURE_DIRECTORY(settings->paths.path_libretro_info);
+   ENSURE_DIRECTORY(settings->paths.directory_overlay);
+   ENSURE_DIRECTORY(settings->paths.directory_osk_overlay);
+   /* PORT */
+   ENSURE_DIRECTORY(settings->paths.directory_video_shader);
+   ENSURE_DIRECTORY(dir_get_ptr(RARCH_DIR_SAVESTATE));
+   ENSURE_DIRECTORY(dir_get_ptr(RARCH_DIR_SAVEFILE));
+   ENSURE_DIRECTORY(settings->paths.directory_screenshot);
+   ENSURE_DIRECTORY(settings->paths.directory_system);
+   ENSURE_DIRECTORY(settings->paths.directory_playlist);
+   ENSURE_DIRECTORY(settings->paths.directory_content_favorites);
+   ENSURE_DIRECTORY(settings->paths.directory_content_history);
+   ENSURE_DIRECTORY(settings->paths.directory_content_image_history);
+   ENSURE_DIRECTORY(settings->paths.directory_content_music_history);
+   ENSURE_DIRECTORY(settings->paths.directory_content_video_history);
+   ENSURE_DIRECTORY(settings->paths.directory_input_remapping);
+   ENSURE_DIRECTORY(settings->paths.directory_cache);
+   ENSURE_DIRECTORY(settings->paths.directory_dynamic_wallpapers);
+   ENSURE_DIRECTORY(settings->paths.directory_thumbnails);
+   ENSURE_DIRECTORY(settings->paths.path_content_database);
+   ENSURE_DIRECTORY(settings->paths.path_cheat_database);
+   /* RECORD_CONFIG */
+   /* RECORD_OUTPUT */
+   ENSURE_DIRECTORY(settings->paths.log_dir);
+
+#undef ENSURE_DIRECTORY
+}
+#endif
+
+#ifdef HAVE_ACCESSIBILITY
+bool is_accessibility_enabled(bool accessibility_enable, bool accessibility_enabled)
+{
+   return accessibility_enabled || accessibility_enable;
+}
+#endif
+
+/**
+ * command_event:
+ * @cmd                  : Event command index.
+ *
+ * Performs program event command with index @cmd.
+ *
+ * Returns: true (1) on success, otherwise false (0).
+ **/
+/* Everything closing content does once nothing is left running in
+ * the core.
+ *
+ * The tail half of CMD_EVENT_CORE_DEINIT, called from exactly
+ * where that body runs.  It is separated because it has
+ * to become resumable: the wait above it is the freeze this work is
+ * about, and removing that wait means this half runs later, from the
+ * frame loop, once the tasks have finished.  Extracting it on its
+ * own keeps that change a question of WHEN this is called rather
+ * than what it does.
+ *
+ * Every local is re-derived from its accessor rather than passed in,
+ * so it carries no dependency on the caller's frame. */
+/* Closing content, in two halves around the wait for a save or load
+ * state task still inside the core: CMD_EVENT_CORE_DEINIT waits
+ * between them, a staged content load returns to the frame loop
+ * between them and asks core_deinit_pending() each frame. */
+static void command_event_core_deinit_begin(void)
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   settings_t *settings        = config_get_ptr();
+
+   /* Persist core options before anything below calls
+    * back into the core (auto save-state, unload, deinit),
+    * so a crash there cannot lose them. */
+   runloop_core_options_save();
+
+   /* Restore unpaused state. The recursive command_event call
+    * here re-enters the dispatcher; the UNPAUSE branch is
+    * deliberately small (clears flags, resumes audio) and
+    * does not touch core state, so the self-call is safe.
+    * Any future addition to the UNPAUSE handler that would
+    * touch core state must consider that we're mid-deinit. */
+   runloop_st->paused_hotkey = false;
+   command_event(CMD_EVENT_UNPAUSE, NULL);
+
+   /* The platform that uses ram_state_save calls it when the content
+    * ends and writes it to a file */
+   ram_state_to_file();
+
+   /* Save auto state */
+   if (     (runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING)
+         && !(runloop_st->flags & RUNLOOP_FLAG_SHUTDOWN_INITIATED)
+         && settings->bools.savestate_auto_save)
+      command_event_save_auto_state();
+
+   /* Closing content starts here: retro_run() is not entered again
+    * (core_run's guard), whatever the frame loop does meanwhile. */
+   runloop_st->content_closing = true;
+
+   /* Say what a wait is for: an unexplained frozen frame and a frame
+    * that says "saving state" are very different experiences, and on
+    * slow storage this is seconds.  Only when there is something to
+    * wait for - a close with no save in flight shows nothing. */
+   if (content_save_state_in_progress(NULL))
+   {
+      const char *_msg = msg_hash_to_str(MSG_SAVING_STATE);
+      runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true,
+            NULL, MESSAGE_QUEUE_ICON_DEFAULT,
+            MESSAGE_QUEUE_CATEGORY_INFO);
+      video_driver_cached_frame();
+   }
+}
+
+/* A save or load state task still runs inside the core: both call
+ * into core function pointers (retro_serialize via
+ * content_get_serialized_data, retro_unserialize via core_unserialize)
+ * from the task worker, and the deinit below unloads the library they
+ * live in.  The auto-save just pushed is covered too: it runs against
+ * the same condition. */
+static bool command_event_core_deinit_pending(void)
+{
+   return content_save_state_in_progress(NULL)
+       || content_load_state_in_progress(NULL);
+}
+
+static void command_event_finish_content_deinit(void);
+
+#if defined(HAVE_SMBCLIENT) || defined(HAVE_NFSCLIENT)
+/* How much of what the content read over the network read-ahead had
+ * ready, so a user can tell whether a window size helps: logged once
+ * the core has closed its files, and only while read-ahead is on. */
+static void command_event_log_readahead(const char *proto,
+      unsigned window_kib, unsigned direct_kib)
+{
+   unsigned total = window_kib + direct_kib;
+   if (!total)
+      return;
+   RARCH_LOG("[%s] Read-ahead: %u of %u KiB read came from its window (%u%%).\n",
+         proto, window_kib, total,
+         (unsigned)(((uint64_t)window_kib * 100 + total / 2) / total));
+}
+#endif
+
+static void command_event_core_deinit_finish(void)
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   command_event_finish_content_deinit();
+#ifdef HAVE_SMBCLIENT
+   {
+      unsigned w, d;
+      smb_take_readahead_stats(&w, &d);
+      command_event_log_readahead("SMB", w, d);
+   }
+#endif
+#ifdef HAVE_NFSCLIENT
+   {
+      unsigned w, d;
+      nfs_take_readahead_stats(&w, &d);
+      command_event_log_readahead("NFS", w, d);
+   }
+#endif
+   runloop_st->content_closing = false;
+}
+
+static void command_event_finish_content_deinit(void)
+{
+   runloop_state_t *runloop_st          = runloop_state_get_ptr();
+   settings_t *settings                 = config_get_ptr();
+   video_driver_state_t
+      *video_st                         = video_state_get_ptr();
+   rarch_system_info_t *sys_info        = &runloop_st->system;
+   struct retro_hw_render_callback *hwr = NULL;
+
+         /* Save last selected disk index, if required */
+         if (sys_info)
+            disk_control_save_image_index(&sys_info->disk_control);
+
+         runloop_runtime_log_deinit(runloop_st,
+               settings->bools.content_runtime_log,
+               settings->bools.content_runtime_log_aggregate,
+               settings->paths.directory_runtime_log,
+               settings->paths.directory_playlist);
+
+         content_reset_savestate_backups();
+         hwr = VIDEO_DRIVER_GET_HW_CONTEXT_INTERNAL(video_st);
+#ifdef HAVE_CHEEVOS
+         rcheevos_unload();
+#endif
+#ifdef HAVE_NETWORKING
+         /* The core may have registered a netpacket interface
+          * (RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE). We hold a
+          * heap copy of that struct, but it carries function
+          * pointers into the core. Clear it before the core's dylib
+          * is closed by runloop_event_deinit_core(), otherwise those
+          * pointers dangle into unloaded code. Passing NULL frees and
+          * nulls the cached interface via the existing handler. */
+         netplay_driver_ctl(RARCH_NETPLAY_CTL_SET_CORE_PACKET_INTERFACE,
+               NULL);
+#endif
+         runloop_event_deinit_core();
+
+         /* Clear turbo and hold button state on core unload */
+         {
+            input_driver_state_t *input_st = input_state_get_ptr();
+            if (input_st)
+            {
+               memset(&input_st->turbo_btns, 0, sizeof(turbo_buttons_t));
+               memset(&input_st->hold_btns, 0, sizeof(hold_buttons_t));
+            }
+         }
+
+#ifdef HAVE_RUNAHEAD
+         /* If 'runahead_available' is false, then
+          * runahead is enabled by the user but an
+          * error occurred while the core was running
+          * (typically a save state issue). In this
+          * case we have to 'manually' reset the runahead
+          * runtime variables, otherwise runahead will
+          * remain disabled until the user restarts
+          * RetroArch */
+         if (runloop_st)
+         {
+            if (!(runloop_st->flags & RUNLOOP_FLAG_RUNAHEAD_AVAILABLE))
+               runahead_clear_variables(runloop_st);
+
+            /* Deallocate preemptive frames */
+            preempt_deinit(runloop_st);
+         }
+#endif
+
+         if (hwr)
+            memset(hwr, 0, sizeof(*hwr));
+
+}
+
+/* What the audio driver's teardown drops, put back once it is up again:
+ * the record that the core is held, the menu's entries, the system
+ * sounds the mixer lost. */
+static void retroarch_audio_restarted(runloop_state_t *runloop_st,
+      settings_t *settings)
+{
+   bool core_held = !!(runloop_st->flags & RUNLOOP_FLAG_PAUSED);
+#ifdef HAVE_MENU
+   struct menu_state *menu_st = menu_state_get_ptr();
+   if (     (menu_st->flags & MENU_ST_FLAG_ALIVE)
+         && settings->bools.menu_pause_libretro
+#ifdef HAVE_NETWORKING
+         && netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_PAUSE, NULL)
+#endif
+      )
+      core_held = true;
+#endif
+   (void)settings;
+   if (core_held)
+      audio_driver_pause_fade(true);
+#ifdef HAVE_MENU
+   menu_st->flags |= MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+#endif
+#if defined(HAVE_AUDIOMIXER)
+   audio_driver_load_system_sounds();
+#endif
+}
+
+typedef struct
+{
+   int  cmd;
+   int  arg;
+   bool has_arg;
+} command_later_t;
+
+static void command_event_later_handler(retro_task_t *task)
+{
+   task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+}
+
+/* on the main thread, where finished tasks are retired */
+static void command_event_later_callback(retro_task_t *task,
+      void *task_data, void *user_data, const char *error)
+{
+   command_later_t *later = (command_later_t*)task->state;
+   if (later)
+      command_event((enum event_command)later->cmd,
+            later->has_arg ? &later->arg : NULL);
+}
+
+static void command_event_later_cleanup(retro_task_t *task)
+{
+   free(task->state);
+   task->state = NULL;
+}
+
+bool command_event_later(enum event_command cmd, const int *arg)
+{
+   retro_task_t *task;
+   command_later_t *later = (command_later_t*)malloc(sizeof(*later));
+
+   if (!later)
+      return false;
+   later->cmd     = (int)cmd;
+   later->arg     = arg ? *arg : 0;
+   later->has_arg = arg != NULL;
+   if (!(task = task_init()))
+   {
+      free(later);
+      return false;
+   }
+   task->handler  = command_event_later_handler;
+   task->callback = command_event_later_callback;
+   task->cleanup  = command_event_later_cleanup;
+   task->state    = later;
+   task->flags   |= RETRO_TASK_FLG_MUTE;
+   task_queue_push(task);
+   return true;
+}
+
+bool command_event(enum event_command cmd, void *data)
+{
+   struct rarch_state *p_rarch     = &rarch_st;
+   runloop_state_t *runloop_st     = runloop_state_get_ptr();
+#if defined(HAVE_ACCESSIBILITY) || defined(HAVE_TRANSLATE)
+   access_state_t *access_st       = access_state_get_ptr();
+#endif
+#ifdef HAVE_MENU
+   struct menu_state *menu_st      = menu_state_get_ptr();
+#endif
+   video_driver_state_t *video_st  = video_state_get_ptr();
+   settings_t *settings            = config_get_ptr();
+   recording_state_t *rec_st       = recording_state_get_ptr();
+
+   switch (cmd)
+   {
+      case CMD_EVENT_LOAD_FILES:
+#ifdef HAVE_CHEEVOS
+         if (rcheevos_hardcore_active())
+         {
+            const char *_msg = msg_hash_to_str(MSG_CHEEVOS_LOAD_SAVEFILE_PREVENTED_BY_HARDCORE_MODE);
+            runloop_msg_queue_push(_msg, strlen(_msg), 0, 180, true, NULL,
+                                   MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+            return false;
+         }
+#endif
+         return event_load_save_files(runloop_st->flags & RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED);
+      case CMD_EVENT_SAVE_FILES:
+         return event_save_files(
+               runloop_st->flags & RUNLOOP_FLAG_USE_SRAM,
+#if defined(HAVE_COMPRESSION)
+               settings->bools.save_file_compression,
+#else
+               false,
+#endif
+#ifdef HAVE_CHEATS
+               settings->paths.path_cheat_database
+#else
+               NULL
+#endif
+         );
+      case CMD_EVENT_OVERLAY_UNLOAD:
+#ifdef HAVE_OVERLAY
+         input_overlay_unload();
+#endif
+#if defined(HAVE_TRANSLATE) && defined(HAVE_GFX_WIDGETS)
+         /* Because the overlay is a display widget,
+          * it's going to be written
+          * over the menu, so we unset it here. */
+         if (gfx_widgets_ai_service_overlay_get_state() != 0)
+            gfx_widgets_ai_service_overlay_unload();
+#endif
+         break;
+      case CMD_EVENT_OVERLAY_INIT:
+#ifdef HAVE_OVERLAY
+         input_overlay_init();
+#endif
+	 break;
+      case CMD_EVENT_VIDEO_FILTER_INIT:
+      {
+#ifdef HAVE_VIDEO_FILTER
+         const enum retro_pixel_format
+            video_driver_pix_fmt       = video_st->pix_fmt;
+         settings_t  *settings      = config_get_ptr();
+         video_driver_init_filter(video_driver_pix_fmt, settings);
+         video_driver_filter_apply();
+#endif
+         break;
+      }
+      case CMD_EVENT_CHEAT_INDEX_PLUS:
+#ifdef HAVE_CHEATS
+         cheat_manager_index_next();
+#endif
+         break;
+      case CMD_EVENT_CHEAT_INDEX_MINUS:
+#ifdef HAVE_CHEATS
+         cheat_manager_index_prev();
+#endif
+         break;
+      case CMD_EVENT_CHEAT_TOGGLE:
+#ifdef HAVE_CHEATS
+         cheat_manager_toggle(settings->bools.notification_show_cheats_applied);
+#endif
+         break;
+      case CMD_EVENT_SHADER_NEXT:
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+#ifdef HAVE_MENU
+         video_shader_dir_check_shader(menu_st->driver_data, settings,
+               &video_st->dir_shader_list, true, false);
+#else
+         video_shader_dir_check_shader(NULL, settings,
+               &video_st->dir_shader_list, true, false);
+#endif
+#endif
+         break;
+      case CMD_EVENT_SHADER_PREV:
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+#ifdef HAVE_MENU
+         video_shader_dir_check_shader(menu_st->driver_data, settings,
+               &video_st->dir_shader_list, false, true);
+#else
+         video_shader_dir_check_shader(NULL, settings,
+               &video_st->dir_shader_list, false, true);
+#endif
+#endif
+         break;
+      case CMD_EVENT_SHADER_TOGGLE:
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+         video_shader_toggle(settings, false);
+#endif
+         break;
+      case CMD_EVENT_SHADER_PRESET_LOADED:
+         ui_companion_event_command(cmd);
+         break;
+      case CMD_EVENT_SHADERS_APPLY_CHANGES:
+#ifdef HAVE_MENU
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+         menu_shader_manager_apply_changes(menu_shader_get(),
+               settings->paths.directory_video_shader,
+               settings->paths.directory_menu_config
+               );
+#endif
+#endif
+         ui_companion_event_command(cmd);
+         break;
+      case CMD_EVENT_AI_SERVICE_TOGGLE:
+         {
+#ifdef HAVE_TRANSLATE
+            bool ai_service_pause     = settings->bools.ai_service_pause;
+
+            if (!settings->bools.ai_service_enable)
+               break;
+
+            if (ai_service_pause)
+            {
+               /* Unpause on second press */
+               if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+               {
+#ifdef HAVE_ACCESSIBILITY
+                  bool accessibility_enable = settings->bools.accessibility_enable;
+                  unsigned accessibility_narrator_speech_speed = settings->uints.accessibility_narrator_speech_speed;
+                  if (is_accessibility_enabled(
+                           accessibility_enable,
+                           access_st->enabled))
+                     accessibility_speak_priority(
+                           accessibility_enable,
+                           accessibility_narrator_speech_speed,
+                           (char*)msg_hash_to_str(MSG_UNPAUSED), 10);
+#endif
+                  command_event(CMD_EVENT_UNPAUSE, NULL);
+               }
+               else /* Pause on call */
+               {
+                  command_event(CMD_EVENT_PAUSE, NULL);
+                  command_event(CMD_EVENT_AI_SERVICE_CALL, NULL);
+               }
+            }
+            else
+            {
+               /* Don't pause - useful for Text-To-Speech since
+                * the audio can't currently play while paused.
+                * Also useful for cases when users don't want the
+                * core's sound to stop while translating.
+                *
+                * Also, this mode is required for "auto" translation
+                * packages, since you don't want to pause for that.
+                */
+               if (access_st->ai_service_auto == 2)
+               {
+                  /* Auto mode was turned on, but we pressed the
+                   * toggle button, so turn it off now. */
+                  access_st->ai_service_auto = 0;
+#ifdef HAVE_MENU_WIDGETS
+                  gfx_widgets_ai_service_overlay_unload();
+#endif
+               }
+               else
+               {
+                  command_event(CMD_EVENT_AI_SERVICE_CALL, NULL);
+               }
+            }
+#endif
+            break;
+         }
+      case CMD_EVENT_STREAMING_TOGGLE:
+         if (rec_st->streaming_enable)
+            command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+         else
+         {
+            streaming_set_state(true);
+            command_event(CMD_EVENT_RECORD_INIT, NULL);
+         }
+         break;
+      case CMD_EVENT_RUNAHEAD_TOGGLE:
+#if HAVE_RUNAHEAD
+         {
+            if (!core_info_current_supports_runahead())
+            {
+               const char *_msg = msg_hash_to_str(MSG_RUNAHEAD_CORE_DOES_NOT_SUPPORT_RUNAHEAD);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 100, false, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+               break;
+            }
+
+            settings->bools.run_ahead_enabled =
+               !(settings->bools.run_ahead_enabled);
+
+            if (settings->bools.run_ahead_enabled)
+            {
+               char msg[128];
+               size_t _len;
+               if (settings->bools.run_ahead_secondary_instance)
+                  _len = snprintf(msg, sizeof(msg),
+                        msg_hash_to_str(MSG_RUNAHEAD_ENABLED_WITH_SECOND_INSTANCE),
+                        settings->uints.run_ahead_frames);
+               else
+                  _len = snprintf(msg, sizeof(msg),
+                        msg_hash_to_str(MSG_RUNAHEAD_ENABLED),
+                        settings->uints.run_ahead_frames);
+               runloop_msg_queue_push(msg, _len, 1, 100, false,
+                     NULL, MESSAGE_QUEUE_ICON_DEFAULT,
+                     MESSAGE_QUEUE_CATEGORY_INFO);
+
+               /* Disable preemptive frames */
+               settings->bools.preemptive_frames_enable = false;
+               preempt_deinit(runloop_st);
+            }
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_RUNAHEAD_DISABLED);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 100, false, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            }
+
+#ifdef HAVE_MENU
+            /* Update menu */
+            menu_update_runahead_mode();
+#endif
+         }
+#endif
+         break;
+      case CMD_EVENT_PREEMPT_TOGGLE:
+#if HAVE_RUNAHEAD
+         {
+            bool old_warn   = settings->bools.run_ahead_hide_warnings;
+            bool old_inited = runloop_st->preempt_data != NULL;
+
+            /* Toggle with warnings shown */
+            settings->bools.run_ahead_hide_warnings  = false;
+            settings->bools.preemptive_frames_enable =
+                  !(settings->bools.preemptive_frames_enable);
+            command_event(CMD_EVENT_PREEMPT_UPDATE, NULL);
+
+            settings->bools.run_ahead_hide_warnings = old_warn;
+
+            if (old_inited && !runloop_st->preempt_data)
+            {
+               const char *_msg = msg_hash_to_str(MSG_PREEMPT_DISABLED);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 100, false, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            }
+            else if (runloop_st->preempt_data)
+            {
+               char msg[128];
+               size_t _len = snprintf(msg, sizeof(msg), msg_hash_to_str(MSG_PREEMPT_ENABLED),
+                     settings->uints.run_ahead_frames);
+               runloop_msg_queue_push(msg, _len, 1, 100, false, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+
+               /* Disable runahead */
+               settings->bools.run_ahead_enabled        = false;
+            }
+            else /* Failed to init */
+               settings->bools.preemptive_frames_enable = false;
+
+#ifdef HAVE_MENU
+            /* Update menu */
+            menu_update_runahead_mode();
+#endif
+         }
+#endif
+         break;
+      case CMD_EVENT_PREEMPT_UPDATE:
+#if HAVE_RUNAHEAD
+#ifdef HAVE_NETWORKING
+         if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_ENABLED, NULL))
+            break;
+#endif
+         preempt_deinit(runloop_st);
+         preempt_init(runloop_st);
+#endif
+         break;
+      case CMD_EVENT_PREEMPT_RESET_BUFFER:
+#if HAVE_RUNAHEAD
+         if (runloop_st->preempt_data)
+            runloop_st->preempt_data->frame_count = 0;
+#endif
+         break;
+      case CMD_EVENT_RECORDING_TOGGLE:
+         if (rec_st->enable)
+            command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+         else
+            command_event(CMD_EVENT_RECORD_INIT, NULL);
+         break;
+      case CMD_EVENT_SET_PER_GAME_RESOLUTION:
+#if defined(GEKKO)
+         {
+            unsigned dims = 0;
+            char desc[64] = {0};
+
+            command_event(CMD_EVENT_VIDEO_SET_ASPECT_RATIO, NULL);
+
+            if (video_driver_get_video_output_size(&dims, desc, sizeof(desc)))
+            {
+               size_t _len;
+               char msg[128];
+
+               video_driver_set_video_mode(dims, true);
+
+               if (!VIDEO_SCALE_W(dims) || !VIDEO_SCALE_H(dims))
+                  _len = strlcpy(msg, msg_hash_to_str(MSG_SCREEN_RESOLUTION_DEFAULT), sizeof(msg));
+               else
+               {
+                  msg[0] = '\0';
+                  if (*desc)
+                     _len = snprintf(msg, sizeof(msg),
+                        msg_hash_to_str(MSG_SCREEN_RESOLUTION_DESC),
+                        VIDEO_SCALE_W(dims), VIDEO_SCALE_H(dims), desc);
+                  else
+                     _len = snprintf(msg, sizeof(msg), msg_hash_to_str(MSG_SCREEN_RESOLUTION_NO_DESC),
+                        VIDEO_SCALE_W(dims), VIDEO_SCALE_H(dims));
+               }
+
+               runloop_msg_queue_push(msg, _len, 1, 100, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            }
+         }
+#endif
+         break;
+      case CMD_EVENT_LOAD_CORE_PERSIST:
+         {
+            rarch_system_info_t *sys_info     = &runloop_st->system;
+            struct retro_system_info *sysinfo = &sys_info->info;
+            const char *core_path             = p_rarch->path_libretro;
+
+#if defined(HAVE_DYNAMIC)
+            if (!core_path || !*core_path)
+               return false;
+#endif
+
+            if (!libretro_get_system_info(
+                     core_path,
+                     sysinfo,
+                     &sys_info->load_no_content))
+               return false;
+
+            if (!core_info_load(core_path))
+            {
+#ifdef HAVE_DYNAMIC
+               return false;
+#endif
+            }
+         }
+         break;
+      case CMD_EVENT_LOAD_CORE:
+         runloop_st->subsystem_current_count = 0;
+         content_clear_subsystem();
+#ifdef HAVE_DYNAMIC
+         if (!(command_event(CMD_EVENT_LOAD_CORE_PERSIST, NULL)))
+            return false;
+#else
+         command_event(CMD_EVENT_LOAD_CORE_PERSIST, NULL);
+         command_event(CMD_EVENT_QUIT, NULL);
+#endif
+         break;
+#if defined(HAVE_RUNAHEAD) && (defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB))
+      case CMD_EVENT_LOAD_SECOND_CORE:
+         if (   !(runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING)
+             || !(runloop_st->flags & RUNLOOP_FLAG_RUNAHEAD_SECONDARY_CORE_AVAILABLE))
+            return false;
+
+         if (!runloop_st->secondary_lib_handle)
+         {
+            enum runahead_copy_status status =
+               secondary_core_ensure_exists(runloop_st, settings);
+            if (status == RUNAHEAD_COPY_PENDING)
+               /* Copy task still running: not loaded yet, but do
+                * not tear down - the task completes in the
+                * background and a later attempt succeeds. */
+               return false;
+            if (status == RUNAHEAD_COPY_UNAVAILABLE)
+            {
+               runahead_secondary_core_destroy(runloop_st);
+               runloop_st->flags &=
+                  ~RUNLOOP_FLAG_RUNAHEAD_SECONDARY_CORE_AVAILABLE;
+               return false;
+            }
+         }
+         break;
+#endif
+      case CMD_EVENT_LOAD_STATE:
+         {
+#ifdef HAVE_CHEEVOS
+            if (rcheevos_hardcore_active())
+            {
+               const char *_msg = msg_hash_to_str(MSG_CHEEVOS_LOAD_STATE_PREVENTED_BY_HARDCORE_MODE);
+               runloop_msg_queue_push(_msg, strlen(_msg), 0, 180, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+               return false;
+            }
+#endif
+#ifdef HAVE_NETWORKING
+            if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_TIMESKIP, NULL))
+               return false;
+#endif
+            if (!command_event_main_state(cmd))
+               return false;
+            /* Run next frame to see the core output while paused */
+            else if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+            {
+               runloop_st->flags               &= ~RUNLOOP_FLAG_PAUSED;
+               runloop_st->run_frames_and_pause = 1;
+            }
+
+#if HAVE_RUNAHEAD
+            command_event(CMD_EVENT_PREEMPT_RESET_BUFFER, NULL);
+#endif
+         }
+         break;
+      case CMD_EVENT_UNDO_LOAD_STATE:
+      case CMD_EVENT_UNDO_SAVE_STATE:
+      case CMD_EVENT_LOAD_STATE_FROM_RAM:
+         if (!command_event_main_state(cmd))
+            return false;
+         break;
+      case CMD_EVENT_RAM_STATE_TO_FILE:
+         if (!content_ram_state_to_file((char *) data))
+            return false;
+         break;
+      case CMD_EVENT_APPLY_WINDOWED_SCALE:
+      case CMD_EVENT_RESIZE_WINDOWED_SCALE:
+         if
+            (!command_event_resize_windowed_scale
+             (settings,
+              cmd == CMD_EVENT_APPLY_WINDOWED_SCALE
+                 ? settings->uints.video_scale
+                 : runloop_st->pending_windowed_scale))
+            return false;
+         break;
+      case CMD_VIDEO_FILTER_TOGGLE:
+         {
+#ifdef HAVE_VIDEO_FILTER
+            const char *_msg;
+            /* Allow video filter toggle only when there is an active core. */
+            if (!(runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING))
+               break;
+            settings->bools.video_filter_enable = !(settings->bools.video_filter_enable);
+            _msg =
+               settings->bools.video_filter_enable ?
+               msg_hash_to_str(MSG_VIDEO_FILTER_ENABLE_ON) :
+               msg_hash_to_str(MSG_VIDEO_FILTER_ENABLE_OFF);
+
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 60, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            video_driver_filter_apply();
+#endif
+         }
+         break;
+      case CMD_EVENT_MENU_TOGGLE:
+#ifdef HAVE_MENU
+         if (menu_st->flags & MENU_ST_FLAG_ALIVE)
+            retroarch_menu_running_finished(false);
+         else
+            retroarch_menu_running();
+#endif
+         break;
+      case CMD_EVENT_RESET:
+         {
+            const char *_msg = msg_hash_to_str(MSG_RESET);
+#ifdef HAVE_COMMAND
+            /* steps queued for the game before the reset, however it
+             * came - hotkey, menu, command - would play on from it */
+            command_run_frames_forget();
+#endif
+            RARCH_LOG("[Core] %s.\n", _msg);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 120, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+
+            /* A reset throws the game's audio away mid-waveform, and
+             * re-initialising the machine is long enough to empty the device
+             * on the way. See audio_driver_jump_fade_begin(). */
+            {
+               bool ramped = audio_driver_jump_fade_begin();
+               core_reset();
+               audio_driver_jump_fade_end(ramped);
+            }
+#ifdef HAVE_CHEEVOS
+#ifdef HAVE_GFX_WIDGETS
+            rcheevos_reset_game(dispwidget_get_ptr()->active);
+#else
+            rcheevos_reset_game(false);
+#endif
+#endif
+#ifdef HAVE_NETWORKING
+            netplay_driver_ctl(RARCH_NETPLAY_CTL_RESET, NULL);
+#endif
+            /* Recalibrate frame delay target */
+            if (settings->bools.video_frame_delay_auto)
+               video_st->frame_delay_target = 0;
+
+            /* Run a few frames to blank core output while paused */
+            if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+            {
+               runloop_st->flags               &= ~RUNLOOP_FLAG_PAUSED;
+               runloop_st->run_frames_and_pause = 8;
+            }
+
+#if HAVE_RUNAHEAD
+            command_event(CMD_EVENT_PREEMPT_RESET_BUFFER, NULL);
+#endif
+         }
+         return false;
+      case CMD_EVENT_PLAY_REPLAY:
+      {
+#ifdef HAVE_BSV_MOVIE
+         input_driver_state_t *input_st = input_state_get_ptr();
+         char replay_path[PATH_MAX_LENGTH];
+         bool res = true;
+         /* TODO: Consider extending the current replay if we start recording during a playback */
+         if (input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_RECORDING)
+            res = false;
+         else if (input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_PLAYBACK)
+            res = movie_stop(input_st);
+         if (!runloop_get_replay_path(replay_path, sizeof(replay_path), settings->ints.replay_slot))
+            res = false;
+         if (res)
+            res = movie_start_playback(input_st, replay_path);
+         if (!res)
+         {
+            const char *_msg        =
+               msg_hash_to_str(MSG_FAILED_TO_LOAD_MOVIE_FILE);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            RARCH_ERR("[Replay] %s.\n", _msg);
+         }
+         return res;
+#else
+         return false;
+#endif
+      }
+      case CMD_EVENT_RECORD_REPLAY:
+      {
+#ifdef HAVE_BSV_MOVIE
+         char replay_path[PATH_MAX_LENGTH];
+         bool res                       = true;
+         input_driver_state_t *input_st = input_state_get_ptr();
+         int replay_slot                = settings->ints.replay_slot;
+         if (settings->bools.replay_auto_index)
+            replay_slot += 1;
+         /* TODO: Consider cloning and extending the current replay if we start recording during a recording */
+         if (input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_RECORDING)
+            res = false;
+         else if (input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_PLAYBACK)
+            res = movie_stop(input_st);
+         if (!runloop_get_replay_path(replay_path, sizeof(replay_path), replay_slot))
+            res = false;
+         if (res)
+         {
+            const task_notify_t *n = (const task_notify_t*)data;
+            res = movie_start_record_notify(input_st, replay_path,
+                  n ? n->cb : NULL, n ? n->user_data : NULL);
+         }
+         if (res && settings->bools.replay_auto_index)
+            configuration_set_int(settings, settings->ints.replay_slot, replay_slot);
+         if (!res)
+         {
+            const char *_msg = msg_hash_to_str(MSG_FAILED_TO_START_MOVIE_RECORD);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            RARCH_ERR("[Replay] %s.\n", _msg);
+         }
+         return res;
+#else
+         break;
+#endif
+      }
+      case CMD_EVENT_HALT_REPLAY:
+#ifdef HAVE_BSV_MOVIE
+         movie_stop(input_state_get_ptr());
+#endif
+         break;
+      case CMD_EVENT_SAVE_STATE:
+      case CMD_EVENT_SAVE_STATE_TO_RAM:
+         {
+            if (settings->bools.savestate_auto_index)
+            {
+               int prev_slot = settings->ints.state_slot;
+               int next_slot = command_event_get_next_savestate_auto_index(
+                     settings);
+               RARCH_LOG("[State] auto-index advance: slot %d -> %d "
+                     "(max_keep %u) before save.\n",
+                     prev_slot, next_slot,
+                     settings->uints.savestate_max_keep);
+               configuration_set_int(settings, settings->ints.state_slot,
+                  next_slot);
+            }
+         }
+         if (!command_event_main_state(cmd))
+            return false;
+         break;
+      case CMD_EVENT_SAVE_STATE_DECREMENT:
+         {
+            int state_slot            = settings->ints.state_slot;
+
+            /* Slot -1 is (auto) slot. */
+            if (state_slot >= 0)
+            {
+               int new_state_slot = state_slot - 1;
+               configuration_set_int(settings, settings->ints.state_slot, new_state_slot);
+            }
+         }
+         break;
+      case CMD_EVENT_SAVE_STATE_INCREMENT:
+         {
+            int new_state_slot        = settings->ints.state_slot + 1;
+            configuration_set_int(settings, settings->ints.state_slot, new_state_slot);
+         }
+         break;
+      case CMD_EVENT_SAVE_REPLAY_CHECKPOINT:
+      case CMD_EVENT_PREV_REPLAY_CHECKPOINT:
+      case CMD_EVENT_NEXT_REPLAY_CHECKPOINT:
+#ifdef HAVE_BSV_MOVIE
+         {
+            const task_notify_t *n = (const task_notify_t*)data;
+            input_driver_state_t *input_st  = input_state_get_ptr();
+            bool res;
+            if (cmd == CMD_EVENT_SAVE_REPLAY_CHECKPOINT)
+               res = movie_commit_checkpoint(input_st);
+            else if (cmd == CMD_EVENT_PREV_REPLAY_CHECKPOINT)
+               res = movie_skip_to_prev_checkpoint(input_st);
+            else
+               res = movie_skip_to_next_checkpoint(input_st);
+            if (!res)
+               return false;
+            if (n)
+               task_notify_set(&input_st->bsv_movie_op, n->cb, n->user_data);
+         }
+#endif
+         break;
+      case CMD_EVENT_REPLAY_DECREMENT:
+#ifdef HAVE_BSV_MOVIE
+         {
+            int slot            = settings->ints.replay_slot;
+
+            /* Slot -1 is (auto) slot. */
+            if (slot >= 0)
+            {
+               int new_slot = slot - 1;
+               configuration_set_int(settings, settings->ints.replay_slot, new_slot);
+            }
+         }
+#endif
+         break;
+      case CMD_EVENT_REPLAY_INCREMENT:
+#ifdef HAVE_BSV_MOVIE
+         {
+            int new_slot        = settings->ints.replay_slot + 1;
+            configuration_set_int(settings, settings->ints.replay_slot, new_slot);
+         }
+#endif
+         break;
+      case CMD_EVENT_TAKE_SCREENSHOT:
+#ifdef HAVE_SCREENSHOTS
+         {
+            const char *dir_screenshot      = settings->paths.directory_screenshot;
+            if (!take_screenshot(dir_screenshot,
+                     runloop_st->runtime_content_path_basename,
+                     false,
+                     video_driver_cached_frame_is_hw_render(),
+                     false,
+                     true))
+               return false;
+         }
+#endif
+         break;
+      case CMD_EVENT_UNLOAD_CORE:
+         {
+            bool load_dummy_core            = data ? *(bool*)data : true;
+            content_ctx_info_t content_info = {0};
+            rarch_system_info_t *sys_info   = &runloop_st->system;
+            uint8_t flags                   = content_get_flags();
+
+            runloop_st->flags              &= ~RUNLOOP_FLAG_CORE_RUNNING;
+
+            /* Persist core options before anything below calls
+             * back into the core (auto save-state, unload, deinit),
+             * so a crash there cannot lose them. */
+            runloop_core_options_save();
+
+            /* The platform that uses ram_state_save calls it when the content
+             * ends and writes it to a file */
+            ram_state_to_file();
+
+            /* Save auto state */
+            if (     settings->bools.savestate_auto_save
+                  && runloop_st->current_core_type != CORE_TYPE_DUMMY)
+               command_event_save_auto_state();
+
+            /* Save last selected disk index, if required */
+            if (sys_info)
+               disk_control_save_image_index(&sys_info->disk_control);
+
+            runloop_runtime_log_deinit(runloop_st,
+                  settings->bools.content_runtime_log,
+                  settings->bools.content_runtime_log_aggregate,
+                  settings->paths.directory_runtime_log,
+                  settings->paths.directory_playlist);
+
+            if (     (runloop_st->flags & RUNLOOP_FLAG_REMAPS_CORE_ACTIVE)
+                  || (runloop_st->flags & RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE)
+                  || (runloop_st->flags & RUNLOOP_FLAG_REMAPS_GAME_ACTIVE)
+                  || (runloop_st->name.remapfile && *runloop_st->name.remapfile)
+               )
+            {
+               input_remapping_deinit(settings->bools.remap_save_on_exit);
+               input_remapping_set_defaults(true);
+            }
+            else
+               input_remapping_restore_global_config(true, false);
+
+#ifdef HAVE_CONFIGFILE
+            if (runloop_st->flags & RUNLOOP_FLAG_OVERRIDES_ACTIVE)
+            {
+               /* Reload the original config */
+               config_unload_override();
+
+               /* an override that had asked for fullscreen is gone */
+               if (!settings->bools.video_fullscreen)
+                  input_pointer_capture_release(INPUT_CAPTURE_FULLSCREEN
+                        | INPUT_CAPTURE_FULLSCREEN_CURSOR);
+            }
+#endif
+
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+            runloop_st->runtime_shader_preset_path[0] = '\0';
+#endif
+
+#ifdef HAVE_MENU
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+            /* Restore shader option state after temporary fast toggling */
+            {
+               const struct video_shader *menu_shader = menu_shader_get();
+               if (menu_shader && menu_shader->flags & SHDR_FLAG_TEMPORARY)
+               {
+                  bool enabled = !(menu_shader->flags & SHDR_FLAG_DISABLED);
+                  configuration_set_bool(settings, settings->bools.video_shader_enable, enabled);
+               }
+            }
+#endif
+#endif
+            video_driver_restore_cached(settings);
+
+            if (    (flags & CONTENT_ST_FLAG_IS_INITED)
+                  && load_dummy_core)
+            {
+               if (!task_push_start_dummy_core(&content_info))
+                  return false;
+            }
+#ifdef HAVE_PRESENCE
+            {
+               presence_userdata_t userdata;
+               userdata.status = PRESENCE_NETPLAY_NETPLAY_STOPPED;
+               command_event(CMD_EVENT_PRESENCE_UPDATE, &userdata);
+               userdata.status = PRESENCE_MENU;
+               command_event(CMD_EVENT_PRESENCE_UPDATE, &userdata);
+            }
+#endif
+#ifdef HAVE_DYNAMIC
+            path_clear(RARCH_PATH_CORE);
+            /* A staged load closes the old core a frame from now, and
+             * that core's deinit may still save its remap file - it
+             * does when unloading an override above loaded the file
+             * again. The save keeps a disabled button only if the
+             * core described it, and those descriptions are system
+             * information: freed here, they were gone by then and
+             * every disabled button was dropped from the file. The
+             * core's deinit frees the system information itself,
+             * after it has saved. */
+            if (!runloop_st->content_switching)
+               runloop_system_info_free();
+#endif
+            {
+               audio_driver_state_t
+                  *audio_st                  = audio_state_get_ptr();
+               audio_st->callback.callback   = NULL;
+               audio_st->callback.set_state  = NULL;
+            }
+            if (flags & CONTENT_ST_FLAG_IS_INITED)
+            {
+               runloop_st->subsystem_current_count = 0;
+               content_clear_subsystem();
+            }
+#ifdef HAVE_CLOUDSYNC
+            /* Sync on core unload if in automatic mode.  With content
+             * running, its save RAM reaches disk, and stops belonging
+             * to a core, only when its deinit finishes, a frame or more
+             * from now; the sync is pushed from there. */
+            if (settings->uints.cloud_sync_sync_mode == CLOUD_SYNC_MODE_AUTOMATIC)
+            {
+               if (flags & CONTENT_ST_FLAG_IS_INITED)
+                  rarch_st.flags |= RARCH_FLAGS_CLOUD_SYNC_ON_DEINIT;
+               else
+                  task_push_cloud_sync(NULL, NULL);
+            }
+#endif
+         }
+
+#ifdef HAVE_MENU
+         menu_st->flags                 |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH
+                                         |  MENU_ST_FLAG_PREVENT_POPULATE;
+         {
+            bool pending_push = false;
+            menu_driver_ctl(MENU_NAVIGATION_CTL_CLEAR, &pending_push);
+         }
+#endif
+         /* through already, unless it started the dummy core's load */
+         if (!task_content_load_pending())
+            task_content_load_notify_finish(NULL);
+         break;
+      case CMD_EVENT_CLOSE_CONTENT:
+#ifdef HAVE_MENU
+         /* If we need to quit, skip unloading the core to avoid performing
+          * cleanup actions (like writing autosave state) twice. */
+         if (should_quit_on_close())
+         {
+            command_event(CMD_EVENT_QUIT, NULL);
+            break;
+         }
+
+         /* Closing content via hotkey requires toggling menu
+          * and resetting the position later on to prevent
+          * going to empty Quick Menu */
+         if (!(menu_st->flags & MENU_ST_FLAG_ALIVE))
+            command_event(CMD_EVENT_MENU_TOGGLE, NULL);
+
+         menu_st->flags |= MENU_ST_FLAG_PENDING_CLOSE_CONTENT;
+         menu_st->flags |= MENU_ST_FLAG_PENDING_RELOAD_CORE;
+
+#if defined(HAVE_GFX_WIDGETS)
+         /* Remove stale notifications after reinit */
+         dispwidget_get_ptr()->persisting = false;
+#endif
+
+#else
+         command_event(CMD_EVENT_QUIT, NULL);
+#endif
+         break;
+      case CMD_EVENT_QUIT:
+         if (!retroarch_main_quit_staged())
+            return false;
+         break;
+      case CMD_EVENT_CHEEVOS_HARDCORE_MODE_TOGGLE:
+#ifdef HAVE_CHEEVOS
+         rcheevos_toggle_hardcore_paused();
+#endif
+         break;
+      case CMD_EVENT_OSD_NOTIFICATION_TOGGLE:
+#if defined(HAVE_GFX_WIDGETS)
+         {
+            /* Toggle the gfx_widgets notification system to match current
+             * settings WITHOUT a full driver reinit. The classic OSD font is
+             * always initialised by the video drivers and gated per-frame, so
+             * only the widget lifecycle needs adjusting. Mirrors the enable
+             * decision in drivers_init() and the threaded deinit barrier in
+             * driver_uninit(). */
+            /* Gate on the *active* state -- what gfx_widgets_ready() and the
+             * menu read -- not the INITED flag. A persisting deinit leaves
+             * INITED set, which would wedge the toggle after the first use
+             * (toggle worked once, then the menu stopped updating). */
+            dispgfx_widget_t *p_dispwidget = dispwidget_get_ptr();
+            bool widgets_active            = p_dispwidget->active;
+            bool want_widgets              =
+                     settings->bools.video_font_enable
+                  && settings->bools.menu_enable_widgets
+                  && video_st->current_video
+                  && video_st->current_video->gfx_widgets_enabled
+                  && video_st->current_video->gfx_widgets_enabled(
+                        video_st->data);
+
+            if (want_widgets && !widgets_active)
+            {
+               bool force_fs            = ((uint32_t)retro_atomic_load_relaxed_int(&video_st->flags) &
+                     VIDEO_FLAG_FORCE_FULLSCREEN) ? true : false;
+               bool video_is_fullscreen = settings->bools.video_fullscreen
+                     || force_fs;
+               unsigned output_size     = VIDEO_DRIVER_OUTPUT_DIMS(video_st);
+               p_dispwidget->active     = gfx_widgets_init(
+                     disp_get_ptr(),
+                     anim_get_ptr(),
+                     settings,
+                     (uintptr_t)&p_dispwidget->active,
+                     VIDEO_DRIVER_IS_THREADED_INTERNAL(video_st),
+                     output_size,
+                     video_is_fullscreen,
+                     settings->paths.directory_assets,
+                     settings->paths.path_font);
+            }
+            else if (!want_widgets && widgets_active)
+            {
+               /* Full teardown (not persisting): a real user toggle-off
+                * must clear INITED so a later toggle-on re-inits cleanly.
+                * Under the wrapper it runs once the video thread is past
+                * the frame in flight, not waiting for it. */
+#ifdef HAVE_THREADS
+               gfx_widgets_deinit_async();
+#else
+               gfx_widgets_deinit(false);
+#endif
+               p_dispwidget->active = false;
+            }
+         }
+#endif
+#ifdef HAVE_MENU
+         /* Toggling notifications/widgets can change which dependent entries
+          * are shown, so rebuild the current menu list. The old full reinit
+          * did this implicitly via menu_driver_init(); set the flag after the
+          * widget work so it survives into the next menu iteration. */
+         menu_st->flags                 |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH
+                                         |  MENU_ST_FLAG_PREVENT_POPULATE;
+#endif
+         break;
+      case CMD_EVENT_REINIT_FROM_TOGGLE:
+         video_driver_modify_disp_flags(0, VIDEO_FLAG_FORCE_FULLSCREEN);
+         /* this fallthrough is on purpose, it should do
+            a CMD_EVENT_REINIT too */
+      case CMD_EVENT_REINIT:
+         {
+            int reinit_flags = data ? *(const int*)data : DRIVERS_CMD_ALL;
+            if (command_event_reinit(reinit_flags))
+            {
+               /* Audio started over with the rest; what its own
+                * reinit restores after the teardown, this does. */
+               if (reinit_flags & DRIVER_AUDIO_MASK)
+                  retroarch_audio_restarted(runloop_st, settings);
+#if defined(HAVE_AUDIOMIXER) && defined(HAVE_MENU)
+               /* Menu sounds require audio reinit. */
+               else if (settings->bools.audio_enable_menu
+                     && (reinit_flags & DRIVER_MENU_MASK))
+                  command_event(CMD_EVENT_AUDIO_REINIT, NULL);
+#endif
+            }
+         }
+
+         /* Recalibrate frame delay target if not pausing */
+         if (settings->bools.video_frame_delay_auto && !video_st->frame_delay_pause)
+            video_st->frame_delay_target = 0;
+
+         break;
+      case CMD_EVENT_CHEATS_APPLY:
+#ifdef HAVE_CHEATS
+         cheat_manager_apply_cheats(settings->bools.notification_show_cheats_applied);
+#endif
+         break;
+      case CMD_EVENT_SAVE_COMPRESSION_CODEC_APPLY:
+#ifdef HAVE_COMPRESSION
+         rzipstream_set_write_codec(settings->uints.save_compression_codec == 1
+               ? RZIP_CODEC_ZSTD : RZIP_CODEC_DEFLATE);
+#endif
+         break;
+      case CMD_EVENT_REWIND_DEINIT:
+#ifdef HAVE_REWIND
+         {
+            bool core_type_is_dummy   = runloop_st->current_core_type == CORE_TYPE_DUMMY;
+
+            if (core_type_is_dummy)
+               return false;
+
+            state_manager_event_deinit(&runloop_st->rewind_st,
+                  &runloop_st->current_core);
+         }
+#endif
+         break;
+      case CMD_EVENT_REWIND_INIT:
+#ifdef HAVE_REWIND
+         {
+            bool rewind_enable        = settings->bools.rewind_enable;
+            size_t rewind_buf_size    = settings->sizes.rewind_buffer_size;
+            bool core_type_is_dummy   = runloop_st->current_core_type == CORE_TYPE_DUMMY;
+
+            if (core_type_is_dummy)
+               return false;
+#ifdef HAVE_CHEEVOS
+            if (rcheevos_hardcore_active())
+               return false;
+#endif
+#ifdef HAVE_NETWORKING
+            if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_TIMESKIP, NULL))
+               return false;
+#endif
+            if (rewind_enable)
+            {
+#ifdef HAVE_NETWORKING
+               /* Only enable state manager if netplay is not underway
+                  TODO/FIXME: Add a setting for these tweaks */
+               if (!netplay_driver_ctl(
+                        RARCH_NETPLAY_CTL_IS_ENABLED, NULL))
+#endif
+               {
+                  state_manager_event_init(&runloop_st->rewind_st,
+                        (unsigned)rewind_buf_size);
+               }
+            }
+         }
+#endif
+         break;
+      case CMD_EVENT_REWIND_REINIT:
+#ifdef HAVE_REWIND
+         /* to reinitialize the the rewind state manager, we have to recreate it.
+          * the easiest way to do that is a full deinit followed by an init. */
+         if (runloop_st->rewind_st.state != NULL)
+         {
+            command_event(CMD_EVENT_REWIND_DEINIT, NULL);
+            command_event(CMD_EVENT_REWIND_INIT, NULL);
+         }
+#endif
+         break;
+      case CMD_EVENT_REWIND_TOGGLE:
+#ifdef HAVE_REWIND
+         {
+            bool rewind_enable        = settings->bools.rewind_enable;
+            if (rewind_enable)
+               command_event(CMD_EVENT_REWIND_INIT, NULL);
+            else
+               command_event(CMD_EVENT_REWIND_DEINIT, NULL);
+         }
+#endif
+         break;
+      case CMD_EVENT_AUTOSAVE_INIT:
+#ifdef HAVE_THREADS
+         if (runloop_st->flags & RUNLOOP_FLAG_USE_SRAM)
+            autosave_deinit();
+         {
+#ifdef HAVE_NETWORKING
+            unsigned autosave_interval =
+               settings->uints.autosave_interval;
+            /* Only enable state manager if netplay is not underway
+               TODO/FIXME: Add a setting for these tweaks */
+            if (      (autosave_interval != 0)
+                  && !netplay_driver_ctl(
+                     RARCH_NETPLAY_CTL_IS_ENABLED, NULL))
+#endif
+            {
+               if (autosave_init(
+#if defined(HAVE_COMPRESSION)
+                        settings->bools.save_file_compression,
+#else
+                        false,
+#endif
+                        settings->uints.autosave_interval)
+                     )
+                  runloop_st->flags |=  RUNLOOP_FLAG_AUTOSAVE;
+               else
+                  runloop_st->flags &= ~RUNLOOP_FLAG_AUTOSAVE;
+            }
+         }
+#endif
+         break;
+      /* Plain stop and start, deliberately ungated: a gate on the
+       * menu's pause and menu-sound settings would also disable
+       * them for the callers that mean it, such as the 3DS sleep
+       * and wake hooks (the menu toggle does not issue them). */
+      case CMD_EVENT_AUDIO_STOP:
+         if (!audio_driver_stop())
+            return false;
+         break;
+      case CMD_EVENT_AUDIO_START:
+         if (!audio_driver_start(runloop_st->flags & RUNLOOP_FLAG_SHUTDOWN_INITIATED))
+            return false;
+         break;
+#ifdef HAVE_MICROPHONE
+      case CMD_EVENT_MICROPHONE_STOP:
+         if (!microphone_driver_stop())
+            return false;
+         break;
+      case CMD_EVENT_MICROPHONE_START:
+         if (!microphone_driver_start())
+            return false;
+         break;
+#endif
+      case CMD_EVENT_AUDIO_MUTE_TOGGLE:
+         {
+            audio_driver_state_t
+               *audio_st                       = audio_state_get_ptr();
+            bool audio_mute_enable             =
+               *(audio_get_bool_ptr(AUDIO_ACTION_MUTE_ENABLE));
+            const char *msg                    = !audio_mute_enable ?
+               msg_hash_to_str(MSG_AUDIO_MUTED):
+               msg_hash_to_str(MSG_AUDIO_UNMUTED);
+
+            audio_st->mute_enable  =
+               !audio_st->mute_enable;
+
+#if defined(HAVE_GFX_WIDGETS)
+            if (dispwidget_get_ptr()->active)
+               gfx_widget_volume_update_and_show(
+                     settings->floats.audio_volume,
+                     audio_st->mute_enable);
+            else
+#endif
+               runloop_msg_queue_push(msg, strlen(msg), 1, 180, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+         }
+         break;
+      case CMD_EVENT_FPS_TOGGLE:
+         settings->bools.video_fps_show = !(settings->bools.video_fps_show);
+         break;
+      case CMD_EVENT_STATISTICS_TOGGLE:
+         settings->bools.video_statistics_show = !(settings->bools.video_statistics_show);
+         break;
+      case CMD_EVENT_OVERLAY_NEXT:
+         /* Switch to the next available overlay screen. */
+#ifdef HAVE_OVERLAY
+         {
+            bool *check_rotation           = (bool*)data;
+            unsigned output_size;
+            video_driver_state_t
+               *video_st                   = video_state_get_ptr();
+            input_driver_state_t *input_st = input_state_get_ptr();
+            bool inp_overlay_auto_rotate   = settings->bools.input_overlay_auto_rotate;
+            input_overlay_t *ol            = input_st->overlay_ptr;
+            float input_overlay_opacity;
+            if (!ol)
+               return false;
+
+            input_overlay_next_move_touch_masks(ol);
+
+            ol->index                      = ol->next_index;
+            ol->active                     = &ol->overlays[ol->index];
+            video_driver_set_overlay_viewport(ol->active);
+
+            input_overlay_opacity          = (ol->flags & INPUT_OVERLAY_IS_OSK)
+                  ? settings->floats.input_osk_overlay_opacity
+                  : settings->floats.input_overlay_opacity;
+
+            input_overlay_load_active(ol, input_overlay_opacity);
+
+            ol->next_index                 =
+                  (unsigned)((ol->index + 1) % ol->size);
+
+            /* Trigger viewport recalculation - overlay may have viewport override */
+            command_event(CMD_EVENT_VIDEO_SET_ASPECT_RATIO, NULL);
+
+            /* Check orientation, if required */
+            output_size = VIDEO_DRIVER_OUTPUT_DIMS(video_st);
+            if (inp_overlay_auto_rotate)
+               if (check_rotation)
+                  if (*check_rotation)
+                     input_overlay_auto_rotate_(output_size,
+                           settings->bools.input_overlay_enable,
+                           ol);
+         }
+#endif
+         break;
+      case CMD_EVENT_OSK_TOGGLE:
+#ifdef HAVE_OVERLAY
+         {
+            settings_t *settings           = config_get_ptr();
+            input_driver_state_t *input_st = input_state_get_ptr();
+
+            if (input_st->flags & INP_FLAG_KB_LINEFEED_ENABLE)
+               input_st->flags &= ~INP_FLAG_KB_LINEFEED_ENABLE;
+            else if (*settings->paths.path_osk_overlay)
+               input_st->flags |=  INP_FLAG_KB_LINEFEED_ENABLE;
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_OSK_OVERLAY_NOT_SET);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 100, false, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            }
+
+            command_event(CMD_EVENT_OVERLAY_INIT, NULL);
+
+#ifdef HAVE_MENU
+            /* Avoid stray menu input during transition */
+            if (menu_st->flags & MENU_ST_FLAG_ALIVE)
+            {
+               menu_st->input_state.select_inhibit  = true;
+               menu_st->input_state.cancel_inhibit  = true;
+            }
+#endif
+         }
+#endif
+         break;
+      case CMD_EVENT_RELOAD_CONFIG:
+         config_load();
+         break;
+      case CMD_EVENT_DSP_FILTER_INIT:
+#ifdef HAVE_DSP_FILTER
+         {
+            const char *path_audio_dsp_plugin = settings->paths.path_audio_dsp_plugin;
+            audio_driver_dsp_filter_free();
+            if (!path_audio_dsp_plugin || !*path_audio_dsp_plugin)
+               break;
+            if (!audio_driver_dsp_filter_init(path_audio_dsp_plugin))
+            {
+               RARCH_ERR("[DSP] Failed to initialize DSP filter \"%s\".\n",
+                     path_audio_dsp_plugin);
+            }
+         }
+#endif
+         break;
+      case CMD_EVENT_RECORD_DEINIT:
+         rec_st->enable = false;
+         streaming_set_state(false);
+         if (!recording_deinit())
+            return false;
+         break;
+      case CMD_EVENT_RECORD_INIT:
+         rec_st->enable = true;
+         if (!recording_init())
+         {
+            command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+            return false;
+         }
+         break;
+      case CMD_EVENT_HISTORY_DEINIT:
+         if (g_defaults.content_history)
+         {
+            playlist_write_file(g_defaults.content_history);
+            playlist_free(g_defaults.content_history);
+         }
+         g_defaults.content_history = NULL;
+
+         if (g_defaults.music_history)
+         {
+            playlist_write_file(g_defaults.music_history);
+            playlist_free(g_defaults.music_history);
+         }
+         g_defaults.music_history = NULL;
+
+#if defined(HAVE_FFMPEG) || defined(HAVE_MPV) || defined(HAVE_WEBMPLAYER)
+         if (g_defaults.video_history)
+         {
+            playlist_write_file(g_defaults.video_history);
+            playlist_free(g_defaults.video_history);
+         }
+         g_defaults.video_history = NULL;
+#endif
+
+#if defined(HAVE_IMAGEVIEWER) || defined(HAVE_MENU)
+         if (g_defaults.image_history)
+         {
+            playlist_write_file(g_defaults.image_history);
+            playlist_free(g_defaults.image_history);
+         }
+         g_defaults.image_history = NULL;
+#endif
+         break;
+      case CMD_EVENT_HISTORY_INIT:
+         {
+            playlist_config_t playlist_config;
+            const char *_msg                       = NULL;
+            bool history_list_enable               = settings->bools.history_list_enable;
+            const char *path_content_history       = settings->paths.path_content_history;
+            const char *path_content_music_history = settings->paths.path_content_music_history;
+#if defined(HAVE_FFMPEG) || defined(HAVE_MPV) || defined(HAVE_WEBMPLAYER)
+            const char *path_content_video_history = settings->paths.path_content_video_history;
+#endif
+#if defined(HAVE_IMAGEVIEWER) || defined(HAVE_MENU)
+            const char *path_content_image_history = settings->paths.path_content_image_history;
+#endif
+            playlist_config.capacity               = settings->uints.content_history_size;
+            playlist_config.old_format             = settings->bools.playlist_use_old_format;
+            playlist_config.compress               = settings->bools.playlist_compression;
+            playlist_config.fuzzy_archive_match    = settings->bools.playlist_fuzzy_archive_match;
+            /* don't use relative paths for content, music, video, and image histories */
+            playlist_config_set_base_content_directory(&playlist_config, NULL);
+
+            command_event(CMD_EVENT_HISTORY_DEINIT, NULL);
+
+            if (     !history_list_enable
+                  || !playlist_config.capacity
+                  || (rarch_st.flags & RARCH_FLAGS_USER_DIRS_HELD))
+               return false;
+
+            _msg = msg_hash_to_str(MSG_LOADING_HISTORY_FILE);
+
+            /* Note: Sorting is disabled by default for
+             * all content history playlists */
+            if (path_content_history && *path_content_history)
+            {
+               RARCH_LOG("[Playlist] %s: \"%s\".\n", _msg,
+                     path_content_history);
+               playlist_config_set_path(&playlist_config, path_content_history);
+               g_defaults.content_history = playlist_init(&playlist_config);
+               playlist_set_sort_mode(
+                     g_defaults.content_history, PLAYLIST_SORT_MODE_OFF);
+            }
+
+#if defined(HAVE_IMAGEVIEWER) || defined(HAVE_MENU)
+            if (path_content_image_history && *path_content_image_history)
+            {
+               RARCH_LOG("[Playlist] %s: \"%s\".\n", _msg,
+                     path_content_image_history);
+               playlist_config_set_path(&playlist_config, path_content_image_history);
+               g_defaults.image_history = playlist_init(&playlist_config);
+               playlist_set_sort_mode(
+                     g_defaults.image_history, PLAYLIST_SORT_MODE_OFF);
+            }
+#endif
+
+            if (path_content_music_history && *path_content_music_history)
+            {
+               RARCH_LOG("[Playlist] %s: \"%s\".\n", _msg,
+                     path_content_music_history);
+               playlist_config_set_path(&playlist_config, path_content_music_history);
+               g_defaults.music_history = playlist_init(&playlist_config);
+               playlist_set_sort_mode(
+                     g_defaults.music_history, PLAYLIST_SORT_MODE_OFF);
+            }
+
+#if defined(HAVE_FFMPEG) || defined(HAVE_MPV) || defined(HAVE_WEBMPLAYER)
+            if (path_content_video_history && *path_content_video_history)
+            {
+               RARCH_LOG("[Playlist] %s: \"%s\".\n", _msg,
+                     path_content_video_history);
+               playlist_config_set_path(&playlist_config, path_content_video_history);
+               g_defaults.video_history = playlist_init(&playlist_config);
+               playlist_set_sort_mode(
+                     g_defaults.video_history, PLAYLIST_SORT_MODE_OFF);
+            }
+#endif
+         }
+         break;
+      case CMD_EVENT_CORE_INFO_DEINIT:
+         core_info_deinit_list();
+         core_info_free_current_core();
+         break;
+      case CMD_EVENT_CORE_INFO_INIT:
+         {
+            char ext_name[16];
+            const char *dir_libretro       = settings->paths.directory_libretro;
+            const char *path_libretro_info = settings->paths.path_libretro_info;
+            bool show_hidden_files         = settings->bools.show_hidden_files;
+            bool core_info_cache_enable    = settings->bools.core_info_cache_enable;
+            /* data is an optional bool: when true, rescan even if the
+             * list is already current (used after cores or info files
+             * change on disk - core install/delete/restore, info file
+             * download). All other callers only need the list to
+             * exist, so a redundant rescan (a full pass over the info
+             * directory) is skipped. */
+            bool force                     = data ? *(bool*)data : false;
+
+            if (  !force
+                && core_info_list_is_current(
+                     path_libretro_info, dir_libretro,
+                     show_hidden_files, core_info_cache_enable))
+               break;
+
+            command_event(CMD_EVENT_CORE_INFO_DEINIT, NULL);
+
+            if (!frontend_driver_get_core_extension(ext_name, sizeof(ext_name)))
+               return false;
+
+            if (dir_libretro && *dir_libretro)
+            {
+               bool cache_supported = false;
+
+               core_info_init_list(path_libretro_info,
+                     dir_libretro,
+                     ext_name,
+                     show_hidden_files,
+                     core_info_cache_enable,
+                     &cache_supported);
+
+               /* If core info cache is enabled but cache
+                * functionality is unsupported (i.e. because
+                * the core info directory is on read-only
+                * storage), force-disable the setting to
+                * avoid repeated failures */
+               if (core_info_cache_enable && !cache_supported)
+                  configuration_set_bool(settings,
+                        settings->bools.core_info_cache_enable, false);
+            }
+
+            /* The rebuild went through CMD_EVENT_CORE_INFO_DEINIT,
+             * which frees the current-core entry alongside the list
+             * it borrows from.  With a core still loaded, resolve
+             * the entry against the fresh list so consumers keep
+             * the running core's identity and the savestate support
+             * gate keeps its info-file answer instead of falling
+             * back to the no-core default. */
+            if (!path_is_empty(RARCH_PATH_CORE))
+               core_info_load(path_get(RARCH_PATH_CORE));
+         }
+         break;
+      case CMD_EVENT_CORE_DEINIT:
+         command_event_core_deinit_begin();
+         /* A state task calls into the core this unloads.  Reached
+          * when an init fails, and from a staged load's core stage -
+          * after its close has waited the state tasks out from the
+          * frame loop, so there is nothing left to wait for.  The
+          * interactive close goes through retroarch_main_deinit_begin /
+          * _pending / _finish instead. */
+         content_wait_for_save_state_task();
+         content_wait_for_load_state_task();
+         command_event_core_deinit_finish();
+         break;
+      case CMD_EVENT_CORE_INIT:
+         {
+            enum rarch_core_type *type     = (enum rarch_core_type*)data;
+            rarch_system_info_t *sys_info  = &runloop_st->system;
+            input_driver_state_t *input_st = input_state_get_ptr();
+            audio_driver_state_t *audio_st = audio_state_get_ptr();
+
+            content_reset_savestate_backups();
+
+            /* Ensure that disk control interface is reset */
+            if (sys_info)
+               disk_control_set_ext_callback(&sys_info->disk_control, NULL);
+
+            /* Ensure that audio callback interface is reset */
+            audio_st->callback.callback  = NULL;
+            audio_st->callback.set_state = NULL;
+
+            if (     !type
+                  || !runloop_event_init_core(settings, input_st, *type,
+                     p_rarch->dir_savefile, p_rarch->dir_savestate))
+            {
+               /* If core failed to initialise, audio callback
+                * interface may be assigned invalid function
+                * pointers -> ensure it is reset */
+               audio_st->callback.callback  = NULL;
+               audio_st->callback.set_state = NULL;
+               return false;
+            }
+         }
+         break;
+      case CMD_EVENT_VIDEO_APPLY_STATE_CHANGES:
+         video_driver_apply_state_changes();
+         break;
+      case CMD_EVENT_VIDEO_SET_BLOCKING_STATE:
+         {
+            bool adaptive_vsync       = settings->bools.video_adaptive_vsync;
+            unsigned swap_interval    = runloop_get_video_swap_interval(
+                  settings->uints.video_swap_interval);
+            video_driver_state_t
+               *video_st              = video_state_get_ptr();
+            input_driver_state_t
+               *input_st              = input_state_get_ptr();
+
+            if (     video_st->data
+                  && video_st->current_video
+                  && video_st->current_video->set_nonblock_state)
+               video_st->current_video->set_nonblock_state(
+                     video_st->data,
+                     !runloop_vsync_blocks(settings->bools.video_vsync,
+                        settings->bools.video_scanline_sync,
+                        (runloop_st->flags & RUNLOOP_FLAG_FORCE_NONBLOCK) != 0,
+                        (input_st->flags & INP_FLAG_NONBLOCKING) != 0),
+                     video_driver_test_all_flags(
+                        GFX_CTX_FLAGS_ADAPTIVE_VSYNC)
+                     && adaptive_vsync, swap_interval);
+         }
+         break;
+      case CMD_EVENT_VIDEO_SET_ASPECT_RATIO:
+         video_driver_set_aspect_ratio();
+         break;
+      case CMD_EVENT_OVERLAY_SET_SCALE_FACTOR:
+#ifdef HAVE_OVERLAY
+         {
+            overlay_layout_desc_t layout_desc;
+            unsigned output_size;
+            input_driver_state_t *input_st = input_state_get_ptr();
+            input_overlay_t *ol            = input_st->overlay_ptr;
+
+            if (!ol)
+               break;
+
+            if (ol->flags & INPUT_OVERLAY_IS_OSK)
+            {
+               memset(&layout_desc, 0, sizeof(overlay_layout_desc_t));
+               layout_desc.scale_landscape         = 1.0f;
+               layout_desc.scale_portrait          = 1.0f;
+               layout_desc.touch_scale             = 1.0f;
+               layout_desc.auto_scale              = settings->bools.input_osk_overlay_auto_scale;
+            }
+            else
+            {
+               layout_desc.scale_landscape         = settings->floats.input_overlay_scale_landscape;
+               layout_desc.aspect_adjust_landscape = settings->floats.input_overlay_aspect_adjust_landscape;
+               layout_desc.x_separation_landscape  = settings->floats.input_overlay_x_separation_landscape;
+               layout_desc.y_separation_landscape  = settings->floats.input_overlay_y_separation_landscape;
+               layout_desc.x_offset_landscape      = settings->floats.input_overlay_x_offset_landscape;
+               layout_desc.y_offset_landscape      = settings->floats.input_overlay_y_offset_landscape;
+               layout_desc.scale_portrait          = settings->floats.input_overlay_scale_portrait;
+               layout_desc.aspect_adjust_portrait  = settings->floats.input_overlay_aspect_adjust_portrait;
+               layout_desc.x_separation_portrait   = settings->floats.input_overlay_x_separation_portrait;
+               layout_desc.y_separation_portrait   = settings->floats.input_overlay_y_separation_portrait;
+               layout_desc.x_offset_portrait       = settings->floats.input_overlay_x_offset_portrait;
+               layout_desc.y_offset_portrait       = settings->floats.input_overlay_y_offset_portrait;
+               layout_desc.touch_scale             = (float)settings->uints.input_touch_scale;
+               layout_desc.auto_scale              = settings->bools.input_overlay_auto_scale;
+            }
+
+            output_size = VIDEO_DRIVER_OUTPUT_DIMS(video_state_get_ptr());
+            input_overlay_set_scale_factor(ol, &layout_desc, output_size);
+         }
+#endif
+         break;
+      case CMD_EVENT_OVERLAY_SET_ALPHA_MOD:
+         /* Sets a modulating factor for alpha channel. Default is 1.0.
+          * The alpha factor is applied for all overlays. */
+#ifdef HAVE_OVERLAY
+         {
+            input_driver_state_t *input_st = input_state_get_ptr();
+            input_overlay_t *ol            = input_st->overlay_ptr;
+
+            if (ol)
+            {
+               float input_overlay_opacity = (ol->flags & INPUT_OVERLAY_IS_OSK)
+                     ? settings->floats.input_osk_overlay_opacity
+                     : settings->floats.input_overlay_opacity;
+
+               input_overlay_set_alpha_mod(ol, input_overlay_opacity);
+            }
+         }
+#endif
+         break;
+      case CMD_EVENT_OVERLAY_SET_EIGHTWAY_DIAGONAL_SENSITIVITY:
+#ifdef HAVE_OVERLAY
+         input_overlay_set_eightway_diagonal_sensitivity();
+#endif
+         break;
+      case CMD_EVENT_AUDIO_REINIT:
+         driver_uninit(DRIVER_AUDIO_MASK, DRIVER_LIFETIME_RESET);
+         drivers_init(settings, DRIVER_AUDIO_MASK, DRIVER_LIFETIME_RESET, verbosity_is_enabled());
+         retroarch_audio_restarted(runloop_st, settings);
+         break;
+#ifdef HAVE_MICROPHONE
+      case CMD_EVENT_MICROPHONE_REINIT:
+         driver_uninit(DRIVER_MICROPHONE_MASK, DRIVER_LIFETIME_RESET);
+         drivers_init(settings, DRIVER_MICROPHONE_MASK, DRIVER_LIFETIME_RESET, verbosity_is_enabled());
+#ifdef HAVE_MENU
+         menu_st->flags |= MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+#endif
+         break;
+#endif
+      case CMD_EVENT_SHUTDOWN:
+         {
+#if defined(__linux__) && !defined(ANDROID)
+            const char *_msg = msg_hash_to_str(MSG_VALUE_SHUTTING_DOWN);
+            if (settings->bools.config_save_on_exit)
+               command_event(CMD_EVENT_MENU_SAVE_CURRENT_CONFIG, NULL);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+#ifdef HAVE_LAKKA
+            system("nohup /usr/bin/lakka-shutdown.sh 2>&1 >/dev/null & exit");
+#else
+            command_event(CMD_EVENT_QUIT, NULL);
+            system("shutdown -P now");
+#endif /* HAVE_LAKKA */
+#endif
+         }
+         break;
+      case CMD_EVENT_REBOOT:
+         {
+#if defined(__linux__) && !defined(ANDROID)
+            const char *_msg = msg_hash_to_str(MSG_VALUE_REBOOTING);
+#ifdef HAVE_LAKKA_SWITCH
+            /* Tell Hekate what to boot next via pmc_r2p. A staged
+             * update reboots back into the running Lakka entry
+             * (unless the user opted out) so the initramfs installs
+             * it. If arming fails this is a plain reboot. */
+            if (r2p_is_supported())
+            {
+               lakka_update_check();
+               if (     settings->bools.reboot_force_self_on_update
+                     && lakka_update_pending())
+                  r2p_arm_self();
+               else
+                  r2p_arm_selected();
+            }
+#endif
+            if (settings->bools.config_save_on_exit)
+               command_event(CMD_EVENT_MENU_SAVE_CURRENT_CONFIG, NULL);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+#ifdef HAVE_LAKKA
+            system("nohup /usr/bin/lakka-reboot.sh 2>&1 >/dev/null & exit");
+#else
+            command_event(CMD_EVENT_QUIT, NULL);
+            system("shutdown -r now");
+#endif /* HAVE_LAKKA */
+#endif
+         }
+         break;
+      case CMD_EVENT_RESUME:
+#ifdef HAVE_MENU
+         retroarch_menu_running_finished(false);
+#endif
+         break;
+      case CMD_EVENT_ADD_TO_FAVORITES:
+         {
+            struct string_list *str_list = (struct string_list*)data;
+
+            /* Check whether favourites playlist is at capacity */
+            if (     playlist_size(g_defaults.content_favorites)
+                  >= playlist_capacity(g_defaults.content_favorites))
+            {
+               const char *_msg = msg_hash_to_str(MSG_ADD_TO_FAVORITES_FAILED);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+               return true;
+            }
+
+            if (str_list)
+            {
+               if (str_list->size >= 6)
+               {
+                  struct playlist_entry entry     = {0};
+                  bool playlist_sort_alphabetical = settings->bools.playlist_sort_alphabetical;
+
+                  entry.path      = str_list->elems[0].data; /* content_path */
+                  entry.label     = str_list->elems[1].data; /* content_label */
+                  entry.core_path = str_list->elems[2].data; /* core_path */
+                  entry.core_name = str_list->elems[3].data; /* core_name */
+                  entry.crc32     = str_list->elems[4].data; /* crc32 */
+                  entry.db_name   = str_list->elems[5].data; /* db_name */
+
+                  /* Write playlist entry */
+                  if (playlist_push(g_defaults.content_favorites, &entry))
+                  {
+                     const char *_msg;
+                     enum playlist_sort_mode current_sort_mode =
+                        playlist_get_sort_mode(g_defaults.content_favorites);
+
+                     /* New addition - need to resort if option is enabled */
+                     if (     (playlist_sort_alphabetical
+                           && (current_sort_mode == PLAYLIST_SORT_MODE_DEFAULT))
+                           || (current_sort_mode == PLAYLIST_SORT_MODE_ALPHABETICAL))
+                        playlist_qsort(g_defaults.content_favorites);
+
+                     playlist_write_file(g_defaults.content_favorites);
+                     _msg = msg_hash_to_str(MSG_ADDED_TO_FAVORITES);
+                     runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                           MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+#if TARGET_OS_TV
+                     update_topshelf();
+#endif
+                  }
+               }
+            }
+            break;
+         }
+         case CMD_EVENT_ADD_TO_PLAYLIST:
+         {
+#ifdef HAVE_MENU
+            struct string_list *str_list = (struct string_list*)data;
+
+            if (str_list)
+            {
+               if (str_list->size >= 7)
+               {
+                  playlist_t * playlist;
+                  playlist_config_t playlist_config;
+
+                  struct playlist_entry entry     = {0};
+                  bool playlist_sort_alphabetical = settings->bools.playlist_sort_alphabetical;
+
+                  entry.path      = str_list->elems[0].data; /* content_path */
+                  entry.label     = str_list->elems[1].data; /* content_label */
+                  entry.core_path = str_list->elems[2].data; /* core_path */
+                  entry.core_name = str_list->elems[3].data; /* core_name */
+                  entry.crc32     = str_list->elems[4].data; /* crc32 */
+                  entry.db_name   = str_list->elems[5].data; /* db_name */
+
+                  /* load the playlist */
+                  playlist_config.capacity            = COLLECTION_SIZE;
+                  playlist_config.old_format          = settings->bools.playlist_use_old_format;
+                  playlist_config.compress            = settings->bools.playlist_compression;
+                  playlist_config.fuzzy_archive_match = settings->bools.playlist_fuzzy_archive_match;
+                  playlist_config_set_base_content_directory(&playlist_config,
+                        settings->bools.playlist_portable_paths
+                        ? settings->paths.directory_menu_content
+                        : NULL);
+                  playlist_config_set_path(&playlist_config, str_list->elems[6].data);
+                  playlist = playlist_init(&playlist_config);
+
+                  /* Check whether favourites playlist is at capacity */
+                  if (     playlist_size(playlist)
+                        >= playlist_capacity(playlist))
+                  {
+                     const char *_msg = msg_hash_to_str(MSG_ADD_TO_PLAYLIST_FAILED);
+                     runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                           MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+                     return true;
+                  }
+
+                  /* Write playlist entry */
+                  if (playlist_push(playlist, &entry))
+                  {
+                     const char *_msg = NULL;
+                     enum playlist_sort_mode current_sort_mode =
+                        playlist_get_sort_mode(playlist);
+
+                     /* New addition - need to resort if option is enabled */
+                     if (     (playlist_sort_alphabetical
+                           && (current_sort_mode == PLAYLIST_SORT_MODE_DEFAULT))
+                           || (current_sort_mode == PLAYLIST_SORT_MODE_ALPHABETICAL))
+                        playlist_qsort(playlist);
+
+                     playlist_write_file(playlist);
+                     _msg = msg_hash_to_str(MSG_ADDED_TO_PLAYLIST);
+                     runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                           MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+                  }
+                  menu_st->flags                  |= MENU_ST_FLAG_ENTRIES_NEED_REFRESH;
+                  if (menu_st->driver_ctx->environ_cb)
+                     menu_st->driver_ctx->environ_cb(MENU_ENVIRON_RESET_HORIZONTAL_LIST,
+                           NULL, menu_st->userdata);
+               }
+            }
+#endif
+            break;
+         }
+      case CMD_EVENT_RESET_CORE_ASSOCIATION:
+         {
+            const char *_msg;
+            const char *core_name          = "DETECT";
+            const char *core_path          = "DETECT";
+            size_t *playlist_index         = (size_t*)data;
+            struct playlist_entry entry    = {0};
+            unsigned i                     = 0;
+
+            /* the update function reads our entry as const,
+             * so these casts are safe */
+            entry.core_path                = (char*)core_path;
+            entry.core_name                = (char*)core_name;
+
+            command_playlist_update_write(
+                  NULL, *playlist_index, &entry);
+
+#ifdef HAVE_MENU
+            /* Update playlist metadata */
+            if (     menu_st->driver_ctx
+                  && menu_st->driver_ctx->refresh_thumbnail_image)
+               menu_st->driver_ctx->refresh_thumbnail_image(
+                     menu_st->userdata, i);
+#endif
+
+            _msg = msg_hash_to_str(MSG_RESET_CORE_ASSOCIATION);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            break;
+         }
+      case CMD_EVENT_RESTART_RETROARCH:
+         if (!frontend_driver_set_fork(FRONTEND_FORK_RESTART))
+            return false;
+#ifndef HAVE_DYNAMIC
+         command_event(CMD_EVENT_QUIT, NULL);
+#endif
+         break;
+#ifdef HAVE_CLOUDSYNC
+      case CMD_EVENT_CLOUD_SYNC:
+         task_push_cloud_sync(NULL, NULL);
+         break;
+      case CMD_EVENT_CLOUD_SYNC_RESOLVE_KEEP_LOCAL:
+         task_push_cloud_sync_resolve_keep_local();
+         break;
+      case CMD_EVENT_CLOUD_SYNC_RESOLVE_KEEP_SERVER:
+         task_push_cloud_sync_resolve_keep_server();
+         break;
+#endif
+      case CMD_EVENT_MENU_RESET_TO_DEFAULT_CONFIG:
+         config_set_defaults(config_get_ptr());
+         /* a reset forgets the controllers too, which they get back
+          * when the joypad driver next starts */
+         input_config_forget_controllers();
+         input_driver_restart_with_next_video_restart();
+         break;
+      case CMD_EVENT_MENU_SAVE_CURRENT_CONFIG:
+         /* Same as at quit: the companion's live layout first. */
+         ui_companion_event_command(CMD_EVENT_MENU_SAVE_CURRENT_CONFIG);
+#if !defined(HAVE_DYNAMIC)
+         config_save_file_salamander();
+#endif
+#ifdef HAVE_CONFIGFILE
+         command_event_save_current_config(OVERRIDE_NONE);
+#endif
+         break;
+      case CMD_EVENT_MENU_SAVE_CURRENT_CONFIG_OVERRIDE_CORE:
+#ifdef HAVE_CONFIGFILE
+         command_event_save_current_config(OVERRIDE_CORE);
+#endif
+         break;
+      case CMD_EVENT_MENU_SAVE_CURRENT_CONFIG_OVERRIDE_CONTENT_DIR:
+#ifdef HAVE_CONFIGFILE
+         command_event_save_current_config(OVERRIDE_CONTENT_DIR);
+#endif
+         break;
+      case CMD_EVENT_MENU_SAVE_CURRENT_CONFIG_OVERRIDE_GAME:
+#ifdef HAVE_CONFIGFILE
+         command_event_save_current_config(OVERRIDE_GAME);
+#endif
+         break;
+      case CMD_EVENT_MENU_REMOVE_CURRENT_CONFIG_OVERRIDE_CORE:
+#ifdef HAVE_CONFIGFILE
+         command_event_remove_current_config(OVERRIDE_CORE);
+#endif
+         break;
+      case CMD_EVENT_MENU_REMOVE_CURRENT_CONFIG_OVERRIDE_CONTENT_DIR:
+#ifdef HAVE_CONFIGFILE
+         command_event_remove_current_config(OVERRIDE_CONTENT_DIR);
+#endif
+         break;
+      case CMD_EVENT_MENU_REMOVE_CURRENT_CONFIG_OVERRIDE_GAME:
+#ifdef HAVE_CONFIGFILE
+         command_event_remove_current_config(OVERRIDE_GAME);
+#endif
+         break;
+      case CMD_EVENT_MENU_SAVE_CONFIG:
+#ifdef HAVE_CONFIGFILE
+         if (!command_event_save_core_config(
+                  settings->paths.directory_menu_config,
+                  p_rarch->path_config_file))
+            return false;
+#endif
+         break;
+      case CMD_EVENT_MENU_SAVE_AS_CONFIG:
+         {
+            char conf_path[PATH_MAX_LENGTH];
+            size_t _len = fill_pathname_join(conf_path,
+                  settings->paths.directory_menu_config,
+                  (char*)data, sizeof(conf_path));
+
+            /* Append '.cfg' extension if missing */
+            if (!string_ends_with(conf_path, FILE_PATH_CONFIG_EXTENSION))
+               strlcpy(conf_path + _len, FILE_PATH_CONFIG_EXTENSION, sizeof(conf_path) - _len);
+
+            if (*conf_path)
+               path_set(RARCH_PATH_CONFIG, conf_path);
+#ifdef HAVE_CONFIGFILE
+            command_event_save_current_config(OVERRIDE_NONE);
+#endif
+         }
+         break;
+      case CMD_EVENT_MENU_SAVE_MAIN_CONFIG:
+         {
+#ifdef HAVE_CONFIGFILE
+            char tmp_config[PATH_MAX_LENGTH];
+            tmp_config[0] = '\0';
+
+            /* Temporarily point RARCH_PATH_CONFIG at the
+             * startup config so the save goes to the right
+             * file, then restore the previous value. */
+            if (!path_is_empty(RARCH_PATH_CONFIG_DEFAULT))
+            {
+               strlcpy(tmp_config, path_get(RARCH_PATH_CONFIG),
+                     sizeof(tmp_config));
+               path_set(RARCH_PATH_CONFIG,
+                     path_get(RARCH_PATH_CONFIG_DEFAULT));
+            }
+
+            command_event_save_current_config(OVERRIDE_NONE);
+
+            if (*tmp_config)
+               path_set(RARCH_PATH_CONFIG, tmp_config);
+#endif
+         }
+         break;
+      case CMD_EVENT_PAUSE_TOGGLE:
+         {
+            bool paused          = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
+#ifdef HAVE_ACCESSIBILITY
+            bool accessibility_enable
+                                 = settings->bools.accessibility_enable;
+            unsigned accessibility_narrator_speech_speed
+                                 = settings->uints.accessibility_narrator_speech_speed;
+#endif
+            /* Allow pause toggling only when there is an active core. */
+            if (!(runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING))
+               break;
+#ifdef HAVE_NETWORKING
+            if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_PAUSE, NULL))
+               break;
+#endif
+
+            paused               = !paused;
+
+#ifdef HAVE_ACCESSIBILITY
+            if (is_accessibility_enabled(
+                  accessibility_enable,
+                  access_st->enabled))
+            {
+               if (paused)
+                  accessibility_speak_priority(
+                     accessibility_enable,
+                     accessibility_narrator_speech_speed,
+                     (char*)msg_hash_to_str(MSG_PAUSED), 10);
+               else
+                  accessibility_speak_priority(
+                     accessibility_enable,
+                     accessibility_narrator_speech_speed,
+                     (char*)msg_hash_to_str(MSG_UNPAUSED), 10);
+            }
+#endif
+            if (paused)
+               runloop_st->flags |=  RUNLOOP_FLAG_PAUSED;
+            else
+               runloop_st->flags &= ~RUNLOOP_FLAG_PAUSED;
+            runloop_pause_checks();
+         }
+         break;
+      case CMD_EVENT_UNPAUSE:
+#ifdef HAVE_NETWORKING
+         if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_PAUSE, NULL))
+            break;
+#endif
+         runloop_st->flags      &= ~RUNLOOP_FLAG_PAUSED;
+         runloop_pause_checks();
+         break;
+      case CMD_EVENT_PAUSE:
+         /* Allow pausing only when there is an active core. */
+         if (!(runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING))
+            break;
+#ifdef HAVE_NETWORKING
+         if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_PAUSE, NULL))
+            break;
+#endif
+         runloop_st->flags      |= RUNLOOP_FLAG_PAUSED;
+         runloop_pause_checks();
+         break;
+      case CMD_EVENT_MENU_PAUSE_LIBRETRO:
+#ifdef HAVE_MENU
+         {
+#ifdef HAVE_NETWORKING
+            bool menu_pause_libretro = settings->bools.menu_pause_libretro
+                  && netplay_driver_ctl(RARCH_NETPLAY_CTL_ALLOW_PAUSE, NULL);
+#else
+            bool menu_pause_libretro = settings->bools.menu_pause_libretro;
+#endif
+            /* Changed from inside the menu: the core stops or resumes
+             * behind it on the next iteration, so the audio ramp follows
+             * the new state here rather than at the menu toggle. Either
+             * direction is a no-op when nothing changes. */
+            if (menu_st->flags & MENU_ST_FLAG_ALIVE)
+               audio_driver_pause_fade(menu_pause_libretro);
+#ifdef HAVE_MICROPHONE
+            if (menu_pause_libretro)
+               command_event(CMD_EVENT_MICROPHONE_STOP, NULL);
+            else
+               command_event(CMD_EVENT_MICROPHONE_START, NULL);
+#endif
+         }
+#endif
+         break;
+#ifdef HAVE_NETWORKING
+      case CMD_EVENT_NETPLAY_PING_TOGGLE:
+         settings->bools.netplay_ping_show =
+            !settings->bools.netplay_ping_show;
+         break;
+      case CMD_EVENT_NETPLAY_GAME_WATCH:
+         netplay_driver_ctl(RARCH_NETPLAY_CTL_GAME_WATCH, NULL);
+         break;
+      case CMD_EVENT_NETPLAY_PLAYER_CHAT:
+         netplay_driver_ctl(RARCH_NETPLAY_CTL_PLAYER_CHAT, NULL);
+         break;
+      case CMD_EVENT_NETPLAY_FADE_CHAT_TOGGLE:
+         settings->bools.netplay_fade_chat =
+            !settings->bools.netplay_fade_chat;
+         break;
+      case CMD_EVENT_NETPLAY_DEINIT:
+         deinit_netplay();
+         break;
+      case CMD_EVENT_NETWORK_INIT:
+         network_init();
+         break;
+         /* init netplay manually */
+      case CMD_EVENT_NETPLAY_INIT:
+         {
+            bool ret;
+            char tmp_netplay_server[256];
+            char tmp_netplay_session[256];
+            char *netplay_server  = NULL;
+            char *netplay_session = NULL;
+            unsigned netplay_port = 0;
+
+            /* Hosting through a relay whose address is still being
+             * asked for: set up once the answer is in, from the frame
+             * loop, rather than waiting for it here. */
+            if (netplay_host_setup_defer())
+               break;
+
+            command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+
+            tmp_netplay_server[0]  = '\0';
+            tmp_netplay_session[0] = '\0';
+            if (netplay_decode_hostname(p_rarch->connect_host,
+               tmp_netplay_server, &netplay_port, tmp_netplay_session,
+               sizeof(tmp_netplay_server)))
+            {
+               netplay_server  = tmp_netplay_server;
+               if (p_rarch->connect_mitm_id)
+                  netplay_session = strdup(p_rarch->connect_mitm_id);
+               else
+                  netplay_session = strdup(tmp_netplay_session);
+            }
+            else if (p_rarch->connect_mitm_id)
+                netplay_session   = strdup(p_rarch->connect_mitm_id);
+
+            if (p_rarch->connect_host)
+            {
+                free(p_rarch->connect_host);
+                p_rarch->connect_host = NULL;
+            }
+
+            if (!netplay_server || !*netplay_server)
+               netplay_server = settings->paths.netplay_server;
+            if (!netplay_port)
+               netplay_port   = settings->uints.netplay_port;
+
+            ret = init_netplay(netplay_server, netplay_port, netplay_session);
+
+            if (netplay_session)
+               free(netplay_session);
+            netplay_session          = NULL;
+
+            if (!ret)
+            {
+               command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+               if (p_rarch->connect_mitm_id)
+               {
+                  free(p_rarch->connect_mitm_id);
+                  p_rarch->connect_mitm_id = NULL;
+               }
+               return false;
+            }
+
+            if (p_rarch->connect_mitm_id)
+            {
+               free(p_rarch->connect_mitm_id);
+               p_rarch->connect_mitm_id = NULL;
+            }
+
+            /* Disable rewind & SRAM autosave if it was enabled
+             * TODO/FIXME: Add a setting for these tweaks */
+#ifdef HAVE_REWIND
+            state_manager_event_deinit(&runloop_st->rewind_st,
+                  &runloop_st->current_core);
+#endif
+#ifdef HAVE_THREADS
+            autosave_deinit();
+#endif
+         }
+         break;
+         /* Initialize netplay via lobby when content is loaded */
+      case CMD_EVENT_NETPLAY_INIT_DIRECT:
+         {
+            char netplay_server[256];
+            char netplay_session[256];
+            unsigned netplay_port = 0;
+
+            command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+
+            netplay_server[0]  = '\0';
+            netplay_session[0] = '\0';
+            netplay_decode_hostname((char*) data, netplay_server,
+               &netplay_port, netplay_session, sizeof(netplay_server));
+
+            if (!netplay_port)
+               netplay_port = settings->uints.netplay_port;
+
+            RARCH_LOG("[Netplay] Connecting to %s|%d (direct).\n",
+               netplay_server, netplay_port);
+
+            if (!init_netplay(netplay_server, netplay_port, netplay_session))
+            {
+               command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+               return false;
+            }
+
+            /* Disable rewind if it was enabled
+               TODO/FIXME: Add a setting for these tweaks */
+#ifdef HAVE_REWIND
+            state_manager_event_deinit(&runloop_st->rewind_st,
+                  &runloop_st->current_core);
+#endif
+#ifdef HAVE_THREADS
+            autosave_deinit();
+#endif
+         }
+         break;
+         /* init netplay via lobby when content is not loaded */
+      case CMD_EVENT_NETPLAY_INIT_DIRECT_DEFERRED:
+         {
+            char netplay_server[256];
+            char netplay_session[256];
+            unsigned netplay_port = 0;
+
+            command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+
+            netplay_server[0]  = '\0';
+            netplay_session[0] = '\0';
+            netplay_decode_hostname((char*) data, netplay_server,
+               &netplay_port, netplay_session, sizeof(netplay_server));
+
+            if (!netplay_port)
+               netplay_port = settings->uints.netplay_port;
+
+            RARCH_LOG("[Netplay] Connecting to %s|%d (deferred).\n",
+               netplay_server, netplay_port);
+
+            if (!init_netplay_deferred(netplay_server, netplay_port, netplay_session))
+            {
+               command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+               return false;
+            }
+
+            /* Disable rewind if it was enabled
+             * TODO/FIXME: Add a setting for these tweaks */
+#ifdef HAVE_REWIND
+            state_manager_event_deinit(&runloop_st->rewind_st,
+                  &runloop_st->current_core);
+#endif
+#ifdef HAVE_THREADS
+            autosave_deinit();
+#endif
+         }
+         break;
+      case CMD_EVENT_NETPLAY_ENABLE_HOST:
+         {
+            /* Ask the lobby server for the tunnel address now.
+             *
+             * This is the point where the user has committed to
+             * hosting; host setup does not need the address until
+             * later, and on the content-reload path below not until
+             * content has finished loading.  Starting the round trip
+             * here lets it overlap that, so the wait for it in host
+             * setup usually finds the answer already present.
+             *
+             * Best effort - if this is skipped or fails, host setup
+             * asks exactly as it did before. */
+            netplay_mitm_query_prefetch();
+
+            /* A lockstep host starts on the running content, as a joiner
+             * does: joiners get its state, and reloading restarts the
+             * game, which a core as large as Dolphin may not survive */
+            if (     netplay_driver_ctl(RARCH_NETPLAY_CTL_USE_CORE_PACKET_INTERFACE, NULL)
+                  || netplay_driver_ctl(RARCH_NETPLAY_CTL_USE_LOCKSTEP, NULL))
+            {
+               netplay_driver_ctl(RARCH_NETPLAY_CTL_ENABLE_SERVER, NULL);
+               command_event(CMD_EVENT_NETPLAY_INIT, NULL);
+            }
+            else if (!task_push_netplay_content_reload(NULL))
+            {
+#ifdef HAVE_DYNAMIC
+               const char *_msg = msg_hash_to_str(MENU_ENUM_LABEL_VALUE_NETPLAY_START_WHEN_LOADED);
+               command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+               netplay_driver_ctl(RARCH_NETPLAY_CTL_ENABLE_SERVER, NULL);
+
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 480, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+#else
+               const char *_msg = msg_hash_to_str(MSG_NETPLAY_NEED_CONTENT_LOADED);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 480, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+#endif
+
+               return false;
+            }
+#if HAVE_RUNAHEAD
+            /* Deinit preemptive frames; not compatible with netplay */
+            preempt_deinit(runloop_st);
+#endif
+         }
+         break;
+      case CMD_EVENT_NETPLAY_DISCONNECT:
+         {
+            bool rewind_enable         = settings->bools.rewind_enable;
+            unsigned autosave_interval = settings->uints.autosave_interval;
+
+            netplay_driver_ctl(RARCH_NETPLAY_CTL_DISCONNECT, NULL);
+            netplay_driver_ctl(RARCH_NETPLAY_CTL_DISABLE, NULL);
+
+#ifdef HAVE_REWIND
+            /* Re-enable rewind if it was enabled
+             * TODO/FIXME: Add a setting for these tweaks */
+            if (rewind_enable)
+               command_event(CMD_EVENT_REWIND_INIT, NULL);
+#endif
+            if (autosave_interval != 0)
+               command_event(CMD_EVENT_AUTOSAVE_INIT, NULL);
+         }
+         break;
+      case CMD_EVENT_NETPLAY_HOST_TOGGLE:
+         if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_ENABLED, NULL))
+         {
+            if (     netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_SERVER, NULL)
+                  || netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_CONNECTED, NULL))
+               command_event(CMD_EVENT_NETPLAY_DISCONNECT, NULL);
+         }
+         else
+            command_event(CMD_EVENT_NETPLAY_ENABLE_HOST, NULL);
+
+         break;
+#else
+      case CMD_EVENT_NETPLAY_DEINIT:
+      case CMD_EVENT_NETWORK_INIT:
+      case CMD_EVENT_NETPLAY_INIT:
+      case CMD_EVENT_NETPLAY_INIT_DIRECT:
+      case CMD_EVENT_NETPLAY_INIT_DIRECT_DEFERRED:
+      case CMD_EVENT_NETPLAY_HOST_TOGGLE:
+      case CMD_EVENT_NETPLAY_DISCONNECT:
+      case CMD_EVENT_NETPLAY_ENABLE_HOST:
+      case CMD_EVENT_NETPLAY_PING_TOGGLE:
+      case CMD_EVENT_NETPLAY_GAME_WATCH:
+      case CMD_EVENT_NETPLAY_PLAYER_CHAT:
+      case CMD_EVENT_NETPLAY_FADE_CHAT_TOGGLE:
+         return false;
+#endif
+      case CMD_EVENT_FULLSCREEN_APPLY:
+      case CMD_EVENT_FULLSCREEN_TOGGLE:
+         {
+            audio_driver_state_t
+               *audio_st              = audio_state_get_ptr();
+            bool *userdata            = (bool*)data;
+            bool video_fullscreen     = settings->bools.video_fullscreen;
+            bool ra_is_forced_fs      = ((uint32_t)retro_atomic_load_relaxed_int(&video_st->flags) &
+               VIDEO_FLAG_FORCE_FULLSCREEN) ? true : false;
+            bool new_fullscreen_state = (cmd == CMD_EVENT_FULLSCREEN_APPLY)
+                  ? video_fullscreen : !video_fullscreen && !ra_is_forced_fs;
+            bool exclusive_fullscreen =
+                  video_driver_fullscreen_is_exclusive();
+            bool reinit_drivers;
+            bool audio_was_suspended = AUDIO_FLAGS_GET(audio_st)
+                  & AUDIO_FLAG_SUSPENDED;
+
+            if (!video_driver_has_windowed())
+               return false;
+
+            video_driver_modify_disp_flags(VIDEO_FLAG_IS_SWITCHING_DISPLAY_MODE, 0);
+
+            /* we toggled manually, write the new value to settings */
+            configuration_set_bool(settings, settings->bools.video_fullscreen,
+                  new_fullscreen_state);
+            /* Need to grab this setting's value again */
+            video_fullscreen = new_fullscreen_state;
+
+            /* we toggled manually, the CLI arg is irrelevant now */
+            if (ra_is_forced_fs)
+               video_driver_modify_disp_flags(0, VIDEO_FLAG_FORCE_FULLSCREEN);
+
+            /* Where the window can change state in place - borderless
+             * or compositor-managed fullscreen - that is all a
+             * toggle is: the window is restyled and the video driver
+             * sees a resize. Device, shaders, audio and input drivers
+             * stay as they are.
+             *
+             * Unsupported or failed transitions rebuild video and input. */
+            reinit_drivers = (exclusive_fullscreen
+                  && !video_driver_test_all_flags(
+                        GFX_CTX_FLAGS_FULLSCREEN_EXCLUSIVE_IN_PLACE))
+                  || !video_driver_test_all_flags(
+                        GFX_CTX_FLAGS_FULLSCREEN_IN_PLACE)
+                  || !video_driver_set_video_mode(
+                        video_driver_window_dims(new_fullscreen_state),
+                        new_fullscreen_state);
+            if (reinit_drivers)
+            {
+               int reinit_flags = DRIVER_VIDEO_AND_INPUT_MASK;
+               AUDIO_FLAGS_SET(audio_st, AUDIO_FLAG_SUSPENDED);
+               command_event(CMD_EVENT_REINIT, &reinit_flags);
+            }
+            /* The key that asked for this is likely still down, and the
+             * window loses the focus for a moment either way: it is not
+             * to ask again when the focus is back. */
+            input_driver_hold_over_window_change();
+            /* fullscreen hides the cursor, and exclusive fullscreen
+             * grabs; leaving it lets go of that and of nothing else */
+            input_pointer_capture_set_fullscreen(video_fullscreen,
+                  exclusive_fullscreen);
+            input_pointer_capture_apply(false);
+#ifdef HAVE_OVERLAY
+            input_overlay_check_mouse_cursor();
+#endif
+
+            video_driver_modify_disp_flags(0, VIDEO_FLAG_IS_SWITCHING_DISPLAY_MODE);
+            if (reinit_drivers && !audio_was_suspended)
+               AUDIO_FLAGS_CLEAR(audio_st, AUDIO_FLAG_SUSPENDED);
+
+            if (userdata && *userdata == true)
+               video_driver_cached_frame();
+         }
+         break;
+      case CMD_EVENT_DISK_APPEND_IMAGE:
+         {
+            const char *path              = (const char*)data;
+            rarch_system_info_t *sys_info = &runloop_st->system;
+
+            if (!path || !*path || !sys_info)
+               return false;
+
+            if (disk_control_enabled(&sys_info->disk_control))
+               return command_event_disk_control_append_image(path);
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 120, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+            }
+         }
+         break;
+      case CMD_EVENT_DISK_EJECT_TOGGLE:
+         {
+            rarch_system_info_t *sys_info = &runloop_st->system;
+
+            if (!sys_info)
+               return false;
+
+            if (disk_control_enabled(&sys_info->disk_control))
+            {
+               bool *show_msg                  = (bool*)data;
+               bool eject                      = !disk_control_get_eject_state(
+                                                  &sys_info->disk_control);
+               bool verbose                    = true;
+
+               if (show_msg)
+                  verbose                      = *show_msg;
+
+               if (!settings->bools.notification_show_disk_control)
+                  verbose                      = false;
+
+               disk_control_set_eject_state(
+                     &sys_info->disk_control, eject, verbose);
+
+#if defined(HAVE_MENU)
+               /* It is necessary to refresh the disk options
+                * menu when toggling the tray state */
+               menu_st->flags                 |=  MENU_ST_FLAG_ENTRIES_NEED_REFRESH
+                                               |  MENU_ST_FLAG_PREVENT_POPULATE;
+#endif
+            }
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 120, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+            }
+         }
+         break;
+      case CMD_EVENT_DISK_NEXT:
+         {
+            rarch_system_info_t *sys_info = &runloop_st->system;
+
+            if (!sys_info)
+               return false;
+
+            if (disk_control_enabled(&sys_info->disk_control))
+            {
+               bool *show_msg = (bool*)data;
+               bool verbose   = true;
+
+               if (show_msg)
+                  verbose     = *show_msg;
+
+               if (!settings->bools.notification_show_disk_control)
+                  verbose     = false;
+
+               disk_control_set_index_next(&sys_info->disk_control, verbose);
+            }
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 120, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+            }
+         }
+         break;
+      case CMD_EVENT_DISK_PREV:
+         {
+            rarch_system_info_t *sys_info = &runloop_st->system;
+
+            if (!sys_info)
+               return false;
+
+            if (disk_control_enabled(&sys_info->disk_control))
+            {
+               bool *show_msg = (bool*)data;
+               bool verbose   = true;
+
+               if (show_msg)
+                  verbose     = *show_msg;
+
+               if (!settings->bools.notification_show_disk_control)
+                  verbose     = false;
+
+               disk_control_set_index_prev(&sys_info->disk_control, verbose);
+            }
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 120, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+            }
+         }
+         break;
+      case CMD_EVENT_DISK_INDEX:
+         {
+            rarch_system_info_t *sys_info = &runloop_st->system;
+            unsigned *index               = (unsigned*)data;
+
+            if (!sys_info || !index)
+               return false;
+
+            /* Note: Menu itself provides visual feedback - no
+             * need to print info message to screen */
+            if (disk_control_enabled(&sys_info->disk_control))
+               disk_control_set_index(&sys_info->disk_control, *index, false);
+            else
+            {
+               const char *_msg = msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS);
+               runloop_msg_queue_push(_msg, strlen(_msg), 1, 120, true, NULL,
+                     MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+            }
+         }
+         break;
+      case CMD_EVENT_RUMBLE_STOP:
+         input_driver_stop_rumble();
+         break;
+      case CMD_EVENT_TURBO_FIRE_TOGGLE:
+         configuration_set_bool(settings,
+               settings->bools.input_turbo_enable, !settings->bools.input_turbo_enable);
+         break;
+      case CMD_EVENT_GRAB_MOUSE_TOGGLE:
+         if (!input_pointer_capture_toggle())
+            return false;
+         break;
+      case CMD_EVENT_UI_COMPANION_TOGGLE:
+         {
+#ifdef HAVE_COMPANION_WIMP
+            bool desktop_menu_enable = settings->bools.desktop_menu_enable;
+            bool ui_companion_toggle = settings->bools.ui_companion_toggle;
+#else
+            bool desktop_menu_enable = false;
+            bool ui_companion_toggle = false;
+#endif
+            ui_companion_driver_toggle(desktop_menu_enable,
+                  ui_companion_toggle, true);
+         }
+         break;
+      case CMD_EVENT_GAME_FOCUS_TOGGLE:
+         {
+            enum input_game_focus_cmd_type game_focus_cmd = GAME_FOCUS_CMD_TOGGLE;
+            input_driver_state_t
+               *input_st                                  = input_state_get_ptr();
+            bool current_enable_state                     = input_st->game_focus_state.enabled;
+            bool apply_update                             = false;
+            bool show_message                             = false;
+
+            if (data)
+               game_focus_cmd = *((enum input_game_focus_cmd_type*)data);
+
+            switch (game_focus_cmd)
+            {
+               case GAME_FOCUS_CMD_OFF:
+                  /* Force game focus off */
+                  input_st->game_focus_state.enabled = false;
+                  if (input_st->game_focus_state.enabled != current_enable_state)
+                  {
+                     apply_update = true;
+                     show_message = true;
+                  }
+                  break;
+               case GAME_FOCUS_CMD_ON:
+                  /* Force game focus on */
+                  input_st->game_focus_state.enabled = true;
+                  if (input_st->game_focus_state.enabled != current_enable_state)
+                  {
+                     apply_update = true;
+                     show_message = true;
+                  }
+                  break;
+               case GAME_FOCUS_CMD_TOGGLE:
+                  /* Invert current game focus state */
+                  input_st->game_focus_state.enabled = !input_st->game_focus_state.enabled;
+#ifdef HAVE_MENU
+                  /* If menu is currently active, disable
+                   * 'toggle on' functionality */
+                  if (menu_st->flags & MENU_ST_FLAG_ALIVE)
+                     input_st->game_focus_state.enabled = false;
+#endif
+                  if (input_st->game_focus_state.enabled != current_enable_state)
+                  {
+                     apply_update = true;
+                     show_message = true;
+                  }
+                  break;
+               case GAME_FOCUS_CMD_REAPPLY:
+                  /* Reapply current game focus state */
+                  apply_update = true;
+                  show_message = false;
+                  break;
+               default:
+                  break;
+            }
+
+            if (apply_update)
+            {
+               input_driver_state_t
+                  *input_st          = input_state_get_ptr();
+
+               /* game focus holds the pointer while it is on; off, the
+                * pointer stays captured for whatever else wants it */
+               if (input_st->game_focus_state.enabled)
+                  input_pointer_capture_hold(INPUT_CAPTURE_GAME_FOCUS);
+               else
+                  input_pointer_capture_release(INPUT_CAPTURE_GAME_FOCUS);
+
+               /* ... and the keyboard, under its own name: a line of
+                * text or the menu's wait for a key may have it as
+                * well, and each lets go of its own */
+               if (input_st->game_focus_state.enabled)
+               {
+                  input_keyboard_capture_hold(INPUT_KEYBOARD_CAPTURE_GAME_FOCUS);
+                  input_st->flags |=  INP_FLAG_BLOCK_HOTKEY;
+               }
+               else
+               {
+                  input_keyboard_capture_release(INPUT_KEYBOARD_CAPTURE_GAME_FOCUS);
+                  /* the hotkeys are back unless someone else still
+                   * has the keyboard */
+                  if (!(input_st->flags & INP_FLAG_KB_MAPPING_BLOCKED))
+                     input_st->flags &= ~INP_FLAG_BLOCK_HOTKEY;
+               }
+
+               if (show_message)
+               {
+                  const char *_msg =
+                        input_st->game_focus_state.enabled
+                        ? msg_hash_to_str(MSG_GAME_FOCUS_ON)
+                        : msg_hash_to_str(MSG_GAME_FOCUS_OFF);
+
+                  runloop_msg_queue_push(_msg, strlen(_msg), 1, 60, true, NULL,
+                        MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+               }
+
+               RARCH_DBG("[Input] %s => %s\n",
+                     "Game Focus",
+                     input_st->game_focus_state.enabled ? "ON" : "OFF");
+            }
+         }
+         break;
+      case CMD_EVENT_VOLUME_UP:
+         command_event_set_volume(settings, 0.5f,
+#if defined(HAVE_GFX_WIDGETS)
+               dispwidget_get_ptr()->active,
+#else
+               false,
+#endif
+               audio_state_get_ptr()->mute_enable
+         );
+         break;
+      case CMD_EVENT_VOLUME_DOWN:
+         command_event_set_volume(settings, -0.5f,
+#if defined(HAVE_GFX_WIDGETS)
+               dispwidget_get_ptr()->active,
+#else
+               false,
+#endif
+               audio_state_get_ptr()->mute_enable
+         );
+         break;
+      case CMD_EVENT_MIXER_VOLUME_UP:
+         command_event_set_mixer_volume(settings, 0.5f);
+         break;
+      case CMD_EVENT_MIXER_VOLUME_DOWN:
+         command_event_set_mixer_volume(settings, -0.5f);
+         break;
+      case CMD_EVENT_SET_FRAME_LIMIT:
+         {
+            video_driver_state_t
+               *video_st                        = video_state_get_ptr();
+            runloop_set_frame_limit(&video_st->av_info,
+                  runloop_get_fastforward_ratio(
+                     settings,
+                     &runloop_st->fastmotion_override.current));
+         }
+         break;
+      case CMD_EVENT_CAMERA_ALLOW_APPLY:
+         /* Allowing again does nothing by itself: the core has to call
+          * start() for the camera to come up, and that start raises
+          * the bit. Disallowing stops a camera that is running. */
+         if (!settings->bools.camera_allow)
+            driver_camera_stop();
+         break;
+      case CMD_EVENT_DISCORD_INIT:
+#ifdef HAVE_DISCORD
+         {
+            bool discord_enable         = settings ? settings->bools.discord_enable : false;
+            const char *discord_app_id  = settings ? settings->arrays.discord_app_id : NULL;
+            discord_state_t *discord_st = discord_state_get_ptr();
+            if (!settings)
+               return false;
+            if (!discord_enable)
+               return false;
+            if (!discord_st->ready)
+               discord_init(discord_app_id, p_rarch->launch_arguments);
+         }
+#endif
+         break;
+      case CMD_EVENT_PRESENCE_UPDATE:
+         {
+#ifdef HAVE_PRESENCE
+            presence_userdata_t *userdata = NULL;
+            if (!data)
+               return false;
+
+            userdata = (presence_userdata_t*)data;
+            presence_update(userdata->status);
+#endif
+         }
+         break;
+
+      case CMD_EVENT_AI_SERVICE_CALL:
+         {
+#ifdef HAVE_TRANSLATE
+#ifdef HAVE_ACCESSIBILITY
+            bool accessibility_enable = settings->bools.accessibility_enable;
+            unsigned accessibility_narrator_speech_speed = settings->uints.accessibility_narrator_speech_speed;
+#endif
+            unsigned ai_service_mode  = settings->uints.ai_service_mode;
+
+#ifdef HAVE_AUDIOMIXER
+            if (    (ai_service_mode == 1)
+                  && audio_driver_is_ai_service_speech_running())
+            {
+               audio_driver_mixer_stop_stream(10);
+               audio_driver_mixer_remove_stream(10);
+#ifdef HAVE_ACCESSIBILITY
+               if (is_accessibility_enabled(
+                        accessibility_enable,
+                        access_st->enabled))
+                  accessibility_speak_priority(
+                        accessibility_enable,
+                        accessibility_narrator_speech_speed,
+                        (char*)msg_hash_to_str(MSG_AI_SERVICE_STOPPED),
+                        10);
+#endif
+            }
+            else
+#endif
+#ifdef HAVE_ACCESSIBILITY
+            if (is_accessibility_enabled(
+                     accessibility_enable,
+                     access_st->enabled)
+                  && (ai_service_mode == 2)
+                  && is_narrator_running(accessibility_enable))
+               accessibility_speak_priority(
+                     accessibility_enable,
+                     accessibility_narrator_speech_speed,
+                     (char*)msg_hash_to_str(MSG_AI_SERVICE_STOPPED),
+                     10);
+            else
+#endif
+            {
+               bool paused = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
+               if (data)
+                  paused = *((bool*)data);
+               if (     (access_st->ai_service_auto == 0)
+                     && !settings->bools.ai_service_pause)
+                  access_st->ai_service_auto = 1;
+               run_translation_service(settings, paused);
+            }
+#endif
+            break;
+         }
+      case CMD_EVENT_CONTROLLER_INIT:
+         {
+            rarch_system_info_t *sys_info = &runloop_st->system;
+            if (sys_info)
+               command_event_init_controllers(sys_info, settings,
+                     settings->uints.input_max_users);
+         }
+         break;
+      case CMD_EVENT_VRR_RUNLOOP_TOGGLE:
+         {
+            const char *_msg = msg_hash_to_str(
+                     settings->bools.vrr_runloop_enable ? MSG_VRR_RUNLOOP_ENABLED
+                     : MSG_VRR_RUNLOOP_DISABLED);
+            settings->bools.vrr_runloop_enable = !(settings->bools.vrr_runloop_enable);
+            /* Re-adjust audio/video system rates for the new VRR mode so the
+             * hotkey matches the menu toggle instead of leaving the audio
+             * input rate stale until the next reinit. */
+            driver_ctl(RARCH_DRIVER_CTL_SET_REFRESH_RATE,
+                  &settings->floats.video_refresh_rate);
+            runloop_msg_queue_push(_msg, strlen(_msg), 1, 100, false, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+         }
+         break;
+      case CMD_EVENT_HEADSET_RECENTER:
+         video_driver_headset_recenter();
+         break;
+      case CMD_EVENT_HEADSET_VIEW_TOGGLE:
+         {
+            char msg[256];
+            size_t _len;
+            enum msg_hash_enums value;
+            switch (video_driver_headset_view_toggle())
+            {
+               case VIDEO_HEADSET_VIEW_LAST:
+                  return false;
+               case VIDEO_HEADSET_VIEW_STEREOSCOPIC:
+                  value = MSG_OPENXR_HEADSET_VIEW_STEREOSCOPIC;
+                  break;
+               case VIDEO_HEADSET_VIEW_FLAT:
+                  value = MSG_OPENXR_HEADSET_VIEW_FLAT;
+                  break;
+               default:
+                  value = MSG_OPENXR_HEADSET_VIEW_IMMERSIVE;
+                  break;
+            }
+            _len = snprintf(msg, sizeof(msg),
+                  msg_hash_to_str(MSG_OPENXR_HEADSET_VIEW),
+                  msg_hash_to_str(value));
+            RARCH_LOG("[OpenXR] %s\n", msg);
+            runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+         }
+         break;
+      case CMD_EVENT_LASER_POINTER_TOGGLE:
+         {
+            char msg[256];
+            size_t _len;
+            enum msg_hash_enums value =
+               MENU_ENUM_LABEL_VALUE_VIDEO_OPENXR_LASER_AUTO;
+            unsigned laser            = settings->uints.video_openxr_laser;
+            if (laser != VIDEO_OPENXR_LASER_OFF)
+            {
+               p_rarch->laser_last = laser;
+               laser               = VIDEO_OPENXR_LASER_OFF;
+            }
+            else
+               laser               = p_rarch->laser_last;
+            configuration_set_uint(settings,
+                  settings->uints.video_openxr_laser, laser);
+            if (laser == VIDEO_OPENXR_LASER_ALWAYS)
+               value = MENU_ENUM_LABEL_VALUE_VIDEO_OPENXR_LASER_ALWAYS;
+            else if (laser == VIDEO_OPENXR_LASER_OFF)
+               value = MENU_ENUM_LABEL_VALUE_VIDEO_OPENXR_LASER_OFF;
+            _len = snprintf(msg, sizeof(msg),
+                  msg_hash_to_str(MSG_OPENXR_LASER_POINTER),
+                  msg_hash_to_str(value));
+            RARCH_LOG("[OpenXR] %s\n", msg);
+            runloop_msg_queue_push(msg, _len, 1, 180, true, NULL,
+                  MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+#ifdef HAVE_MENU
+            /* As a menu setting change does: the list shows the value. */
+            menu_st->flags |= MENU_ST_FLAG_ENTRIES_NEED_REFRESH
+                            | MENU_ST_FLAG_PREVENT_POPULATE;
+#endif
+         }
+         break;
+      case CMD_EVENT_NONE:
+         return false;
+
+      /* Do nothing about the special negative value */
+      case CMD_SPECIAL:
+         break;
+   }
+
+   return true;
+}
+
+/* FRONTEND */
+
+void retroarch_override_setting_set(
+      enum rarch_override_setting enum_idx, void *data)
+{
+   struct rarch_state            *p_rarch = &rarch_st;
+#ifdef HAVE_NETWORKING
+   net_driver_state_t *net_st  = networking_state_get_ptr();
+#endif
+
+   switch (enum_idx)
+   {
+      case RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE:
+         {
+            unsigned *val = (unsigned*)data;
+            if (val)
+            {
+               unsigned                bit = *val;
+               runloop_state_t *runloop_st = runloop_state_get_ptr();
+               BIT256_SET(runloop_st->has_set_libretro_device, bit);
+            }
+         }
+         break;
+      case RARCH_OVERRIDE_SETTING_VERBOSITY:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_VERBOSITY;
+         break;
+      case RARCH_OVERRIDE_SETTING_LIBRETRO:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_LIBRETRO;
+         break;
+      case RARCH_OVERRIDE_SETTING_LIBRETRO_DIRECTORY:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_LIBRETRO_DIRECTORY;
+         break;
+      case RARCH_OVERRIDE_SETTING_SAVE_PATH:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_SAVE_PATH;
+         break;
+      case RARCH_OVERRIDE_SETTING_STATE_PATH:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_STATE_PATH;
+         break;
+#ifdef HAVE_NETWORKING
+     case RARCH_OVERRIDE_SETTING_NETPLAY_MODE:
+         net_st->flags |= NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_MODE;
+         break;
+      case RARCH_OVERRIDE_SETTING_NETPLAY_IP_ADDRESS:
+         net_st->flags |= NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_IP_ADDRESS;
+         break;
+      case RARCH_OVERRIDE_SETTING_NETPLAY_IP_PORT:
+         net_st->flags |= NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_IP_PORT;
+         break;
+      case RARCH_OVERRIDE_SETTING_NETPLAY_CHECK_FRAMES:
+         net_st->flags |= NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_CHECK_FRAMES;
+         break;
+#endif
+      case RARCH_OVERRIDE_SETTING_UPS_PREF:
+#ifdef HAVE_PATCH
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_UPS_PREF;
+#endif
+         break;
+      case RARCH_OVERRIDE_SETTING_BPS_PREF:
+#ifdef HAVE_PATCH
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_BPS_PREF;
+#endif
+         break;
+      case RARCH_OVERRIDE_SETTING_IPS_PREF:
+#ifdef HAVE_PATCH
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_IPS_PREF;
+#endif
+         break;
+       case RARCH_OVERRIDE_SETTING_XDELTA_PREF:
+#if defined(HAVE_PATCH) && defined(HAVE_XDELTA)
+           p_rarch->flags |= RARCH_FLAGS_HAS_SET_XDELTA_PREF;
+#endif
+           break;
+      case RARCH_OVERRIDE_SETTING_LOG_TO_FILE:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_LOG_TO_FILE;
+         break;
+      case RARCH_OVERRIDE_SETTING_DATABASE_SCAN:
+         p_rarch->flags |= RARCH_FLAGS_CLI_DATABASE_SCAN;
+         break;
+      case RARCH_OVERRIDE_SETTING_OVERLAY_PRESET:
+         p_rarch->flags |= RARCH_FLAGS_HAS_SET_OVERLAY_PRESET;
+         break;
+      case RARCH_OVERRIDE_SETTING_NONE:
+      default:
+         break;
+   }
+}
+
+void retroarch_override_setting_unset(
+      enum rarch_override_setting enum_idx, void *data)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+#ifdef HAVE_NETWORKING
+   net_driver_state_t *net_st  = networking_state_get_ptr();
+#endif
+
+   switch (enum_idx)
+   {
+      case RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE:
+         {
+            unsigned *val = (unsigned*)data;
+            if (val)
+            {
+               unsigned                bit = *val;
+               runloop_state_t *runloop_st = runloop_state_get_ptr();
+               BIT256_CLEAR(runloop_st->has_set_libretro_device, bit);
+            }
+         }
+         break;
+      case RARCH_OVERRIDE_SETTING_VERBOSITY:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_VERBOSITY;
+         break;
+      case RARCH_OVERRIDE_SETTING_LIBRETRO:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_LIBRETRO;
+         break;
+      case RARCH_OVERRIDE_SETTING_LIBRETRO_DIRECTORY:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_LIBRETRO_DIRECTORY;
+         break;
+      case RARCH_OVERRIDE_SETTING_SAVE_PATH:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_SAVE_PATH;
+         break;
+      case RARCH_OVERRIDE_SETTING_STATE_PATH:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_STATE_PATH;
+         break;
+#ifdef HAVE_NETWORKING
+    case RARCH_OVERRIDE_SETTING_NETPLAY_MODE:
+         net_st->flags &= ~NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_MODE;
+         break;
+      case RARCH_OVERRIDE_SETTING_NETPLAY_IP_ADDRESS:
+         net_st->flags &= ~NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_IP_ADDRESS;
+         break;
+      case RARCH_OVERRIDE_SETTING_NETPLAY_IP_PORT:
+         net_st->flags &= ~NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_IP_PORT;
+         break;
+      case RARCH_OVERRIDE_SETTING_NETPLAY_CHECK_FRAMES:
+         net_st->flags &= ~NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_CHECK_FRAMES;
+         break;
+#endif
+      case RARCH_OVERRIDE_SETTING_UPS_PREF:
+#ifdef HAVE_PATCH
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_UPS_PREF;
+#endif
+         break;
+      case RARCH_OVERRIDE_SETTING_BPS_PREF:
+#ifdef HAVE_PATCH
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_BPS_PREF;
+#endif
+         break;
+      case RARCH_OVERRIDE_SETTING_IPS_PREF:
+#ifdef HAVE_PATCH
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_IPS_PREF;
+#endif
+         break;
+       case RARCH_OVERRIDE_SETTING_XDELTA_PREF:
+#if defined(HAVE_PATCH) && defined(HAVE_XDELTA)
+           p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_XDELTA_PREF;
+#endif
+         break;
+      case RARCH_OVERRIDE_SETTING_LOG_TO_FILE:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_LOG_TO_FILE;
+         break;
+      case RARCH_OVERRIDE_SETTING_DATABASE_SCAN:
+         p_rarch->flags &= ~RARCH_FLAGS_CLI_DATABASE_SCAN;
+         break;
+      case RARCH_OVERRIDE_SETTING_OVERLAY_PRESET:
+         p_rarch->flags &= ~RARCH_FLAGS_HAS_SET_OVERLAY_PRESET;
+         break;
+      case RARCH_OVERRIDE_SETTING_NONE:
+      default:
+         break;
+   }
+}
+
+static void retroarch_override_setting_free_state(void)
+{
+   size_t i;
+   for (i = 0; i < RARCH_OVERRIDE_SETTING_LAST; i++)
+   {
+      if (i == RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE)
+      {
+         size_t j;
+         for (j = 0; j < MAX_USERS; j++)
+            retroarch_override_setting_unset(
+                  RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE, &j);
+      }
+      else
+         retroarch_override_setting_unset(
+               (enum rarch_override_setting)(i), NULL);
+   }
+}
+
+static void global_free(struct rarch_state *p_rarch)
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+
+   content_deinit();
+
+   runloop_path_deinit_subsystem();
+   command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+
+   retro_main_log_file_deinit();
+
+   runloop_st->flags &= ~(
+                          RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED
+                        | RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED
+                        | RUNLOOP_FLAG_USE_SRAM);
+#ifdef HAVE_PATCH
+   p_rarch->flags    &= ~(
+                         RARCH_FLAGS_BPS_PREF
+                       | RARCH_FLAGS_IPS_PREF
+                       | RARCH_FLAGS_UPS_PREF
+                       | RARCH_FLAGS_XDELTA_PREF);
+   runloop_st->flags &= ~RUNLOOP_FLAG_PATCH_BLOCKED;
+
+#endif
+#ifdef HAVE_CONFIGFILE
+   p_rarch->flags    &= ~RARCH_FLAGS_BLOCK_CONFIG_READ;
+   runloop_st->flags &= ~(RUNLOOP_FLAG_OVERRIDES_ACTIVE
+                        | RUNLOOP_FLAG_REMAPS_CORE_ACTIVE
+                        | RUNLOOP_FLAG_REMAPS_GAME_ACTIVE
+                        | RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE);
+#endif
+
+   runloop_st->current_core.flags &= ~(RETRO_CORE_FLAG_HAS_SET_INPUT_DESCRIPTORS
+                                     | RETRO_CORE_FLAG_HAS_SET_SUBSYSTEMS);
+
+   path_clear_all();
+   dir_clear_all();
+
+   if (runloop_st->name.remapfile && *runloop_st->name.remapfile)
+      free(runloop_st->name.remapfile);
+   runloop_st->name.remapfile = NULL;
+   *runloop_st->name.ups                 = '\0';
+   *runloop_st->name.bps                 = '\0';
+   *runloop_st->name.ips                 = '\0';
+   *runloop_st->name.xdelta              = '\0';
+   *runloop_st->name.savefile            = '\0';
+   *runloop_st->name.savestate           = '\0';
+   *runloop_st->name.replay              = '\0';
+   *runloop_st->name.cheatfile           = '\0';
+   *runloop_st->name.label               = '\0';
+
+   p_rarch->flags                       &= ~(
+                          RARCH_FLAGS_ERR_ON_INIT
+                        | RARCH_FLAGS_LAUNCHED_FROM_CLI
+                        | RARCH_FLAGS_CLI_LOAD_MENU_ON_ERR
+                        | RARCH_FLAGS_INIT_IN_PROGRESS);
+   *p_rarch->error_string                = '\0';
+   retroarch_override_setting_free_state();
+}
+
+#if defined(HAVE_SDL) || defined(HAVE_SDL2) || defined(HAVE_SDL_DINGUX) || defined(HAVE_SDL3)
+static void sdl_exit(void)
+{
+   /* Quit any SDL subsystems, then quit
+    * SDL itself */
+   uint32_t sdl_subsystem_flags = SDL_WasInit(0);
+
+   if (sdl_subsystem_flags != 0)
+   {
+      SDL_QuitSubSystem(sdl_subsystem_flags);
+      SDL_Quit();
+   }
+}
+#endif
+
+/* The platform is taking the application away and may not give it
+ * back - Android, when the activity is paused. Everything that would
+ * otherwise only be written by retroarch_main_quit() is written now:
+ * SRAM, core options and the main config. */
+void retroarch_save_for_suspend(void)
+{
+   settings_t *settings        = config_get_ptr();
+
+   /* Config subsystem is not up yet - nothing to persist. */
+   if (!settings)
+      return;
+
+   /* SRAM first: it is the more expensive of the two, and the more
+    * painful to lose. Non-SRAM cores make this a no-op.
+    *
+    * Only flush while content is actually loaded. APP_CMD_PAUSE can be
+    * delivered while frontend_unix_init() is still pumping events
+    * waiting for the window (activity created, then immediately
+    * backgrounded / screen locked), long before any core exists - and,
+    * worse, while a previous activity instance in the same process may
+    * still be mid-teardown, leaving runloop_state.current_core in a
+    * transient state. There is nothing to save in either case:
+    * CMD_EVENT_SAVE_FILES exists to persist SRAM and game-specific
+    * cheats, both of which require loaded content. */
+   if (runloop_content_loaded())
+      command_event(CMD_EVENT_SAVE_FILES, NULL);
+
+   /* Core options: written unconditionally on core unload, so not
+    * gated on config_save_on_exit here either. Without this, option
+    * changes are lost whenever the process is killed in the
+    * background, e.g. swiped away from Recents. No-op when no core
+    * with options is loaded. */
+   runloop_core_options_save();
+
+   if (settings->bools.config_save_on_exit)
+   {
+      const char *configured_driver = video_driver_get_configured_ident();
+      char live_driver[32];
+
+      live_driver[0] = '\0';
+
+      /* A core that forces its own renderer overwrites video_driver
+       * with the forced name and parks the configured one in
+       * cached_driver_id. Writing the config in that state persists the
+       * core's choice as the user's, so a driver picked from the menu
+       * is silently replaced by whatever the last loaded core wanted.
+       * main_exit() restores the cached name before it saves; do the
+       * same here.
+       *
+       * Unlike main_exit(), swap the live value back afterwards: the
+       * activity may be resumed, and the renderer actually in use does
+       * not change just because the app went to the background. */
+      if (configured_driver)
+      {
+         strlcpy(live_driver, settings->arrays.video_driver,
+               sizeof(live_driver));
+         configuration_set_string(settings,
+               settings->arrays.video_driver,
+               configured_driver);
+      }
+
+      command_event(CMD_EVENT_MENU_SAVE_CURRENT_CONFIG, NULL);
+
+      if (live_driver[0])
+         configuration_set_string(settings,
+               settings->arrays.video_driver, live_driver);
+   }
+}
+
+/**
+ * main_exit:
+ *
+ * Cleanly exit RetroArch.
+ *
+ **/
+/* Retire the task queue while every subsystem a finish callback can
+ * reach is still alive: the exit path tears drivers down before
+ * task_queue_deinit(), and deinit abandons whatever is still queued
+ * - handlers never run, finish callbacks never fire, cleanup
+ * callbacks never release their owners. Cancelling first lets
+ * cancellation-aware handlers wind down instead of completing their
+ * work, and the bound keeps a stuck transfer from hanging quit;
+ * whatever survives the bound meets the old abandonment, now the
+ * fallback instead of the rule. Scheduled-for-later tasks (a set
+ * 'when') do not hold the wait and are dropped as designed. */
+void retroarch_drain_tasks_for_exit(void)
+{
+   task_queue_reset();
+   task_queue_wait_timeout(NULL, NULL, 3 * 1000 * 1000);
+}
+
+void main_exit(void *args)
+{
+   struct rarch_state *p_rarch  = &rarch_st;
+   runloop_state_t *runloop_st  = runloop_state_get_ptr();
+#ifdef HAVE_MENU
+   struct menu_state  *menu_st  = menu_state_get_ptr();
+#endif
+   settings_t     *settings     = config_get_ptr();
+
+   retroarch_drain_tasks_for_exit();
+#ifdef HAVE_CLOUDSYNC
+   /* A blocking cloud sync driver's worker: one bounded wait on the
+    * way out, so no driver call runs into the teardown below. */
+   cloud_sync_deinit(1000);
+#endif
+
+   video_driver_restore_cached(settings);
+
+#if defined(HAVE_GFX_WIDGETS)
+   /* Do not want display widgets to live any more. Only this thread
+    * reads the flag. */
+   dispwidget_get_ptr()->persisting = false;
+#endif
+#ifdef HAVE_MENU
+   /* Do not want menu context to live any more. */
+   if (menu_st)
+      menu_st->flags &= ~MENU_ST_FLAG_DATA_OWN;
+#endif
+   retroarch_ctl(RARCH_CTL_MAIN_DEINIT, NULL);
+
+   if (runloop_st->perfcnt_enable)
+   {
+      RARCH_LOG("[PERF] Performance counters (RetroArch):\n");
+      runloop_log_counters(p_rarch->perf_counters_rarch, p_rarch->perf_ptr_rarch);
+   }
+
+#if defined(HAVE_LOGGER) && !defined(ANDROID)
+   logger_shutdown();
+#endif
+#ifdef PS2
+   /* PS2 frontend driver deinit also detaches filesystem,
+    * so make sure logs are written in advance. */
+   retro_main_log_file_deinit();
+#endif
+   frontend_driver_deinit(args);
+   frontend_driver_exitspawn(
+         p_rarch->path_libretro,
+         sizeof(p_rarch->path_libretro),
+         p_rarch->launch_arguments);
+
+   p_rarch->flags                  &= ~RARCH_FLAGS_HAS_SET_USERNAME;
+   runloop_is_inited_clear();
+   rarch_st.flags         &= ~RARCH_FLAGS_ERR_ON_INIT;
+#ifdef HAVE_CONFIGFILE
+   p_rarch->flags                  &= ~RARCH_FLAGS_BLOCK_CONFIG_READ;
+#endif
+
+   runloop_msg_queue_deinit();
+#ifdef HAVE_DYNAMIC
+   runloop_core_probe_cache_free();
+#endif
+   driver_uninit(DRIVERS_CMD_ALL, (enum driver_lifetime_flags)0);
+   /* an input driver kept for drivers that then failed to start */
+   input_driver_drop_kept();
+
+   retro_main_log_file_deinit();
+
+   retroarch_ctl(RARCH_CTL_STATE_FREE,  NULL);
+   global_free(p_rarch);
+   task_queue_deinit();
+#ifdef HAVE_NETWORKING
+   /* After task_queue_deinit(), so no transfer can still be holding a
+    * pooled connection. */
+   net_http_deinit();
+#endif
+
+   ui_companion_driver_deinit();
+
+   frontend_driver_shutdown(false);
+
+   retroarch_deinit_drivers(&runloop_st->retro_ctx);
+   /* After the drivers: tearing them down reads settings - the Win32
+    * display server restores the original display mode through
+    * win32_monitor_info(), which asks for the monitor index - and a
+    * freed settings object is a crash on the way out, seen on Windows
+    * as a segfault in win32_display_server_destroy() once a run had
+    * changed the mode. */
+   retroarch_config_deinit();
+   uico_state_get_ptr()->drv = NULL;
+   frontend_driver_free();
+
+   rtime_deinit();
+
+#if defined(HAVE_MIST)
+   steam_deinit();
+#endif
+
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+   CoUninitialize();
+#endif
+
+#if defined(HAVE_SDL) || defined(HAVE_SDL2) || defined(HAVE_SDL_DINGUX) || defined(HAVE_SDL3)
+   sdl_exit();
+#endif
+}
+
+#if defined(WEBOS)
+/* make a directory recursively */
+static int mkdir_p(const char *path, mode_t mode)
+{
+    char tmp[PATH_MAX_LENGTH];
+    char *p     = NULL;
+    size_t _len = strlcpy(tmp, path, sizeof(tmp));
+    if (tmp[_len - 1] == '/')
+        tmp[_len - 1] = 0;
+
+    for (p = tmp + 1; *p; p++)
+    {
+        if (*p == '/')
+        {
+            *p = 0;
+            mkdir(tmp, mode);
+            *p = '/';
+        }
+    }
+    return mkdir(tmp, mode);
+}
+#endif
+
+/**
+ * main_entry:
+ *
+ * Main function of RetroArch.
+ *
+ * If HAVE_MAIN is not defined, will contain main loop and will not
+ * be exited from until we exit the program. Otherwise, will
+ * just do initialization.
+ *
+ * Returns: varies per platform.
+ **/
+int rarch_main(int argc, char *argv[], void *data)
+{
+   settings_t *settings;
+   struct rarch_state *p_rarch         = &rarch_st;
+   runloop_state_t *runloop_st         = runloop_state_get_ptr();
+   /* Register file access for the config parser before anything can
+    * load a config - including config-from-string paths that carry
+    * '#include' directives, which resolve through this interface.
+    * The constructors in config_file_io.c self-register too; this
+    * explicit call just removes any ordering dependency on which
+    * config API gets used first. */
+   config_file_set_io_default(config_file_io_filestream());
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+   video_driver_modify_disp_flags(VIDEO_FLAG_SHADER_PRESETS_NEED_RELOAD, 0);
+#endif
+#ifdef HAVE_RUNAHEAD
+   video_driver_modify_disp_flags(VIDEO_FLAG_RUNAHEAD_IS_ACTIVE, 0);
+   runloop_st->flags |= (
+                         RUNLOOP_FLAG_RUNAHEAD_SECONDARY_CORE_AVAILABLE
+                      |  RUNLOOP_FLAG_RUNAHEAD_AVAILABLE
+                      |  RUNLOOP_FLAG_RUNAHEAD_FORCE_INPUT_DIRTY
+                        );
+#endif
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+   /* Mark the process DPI-aware BEFORE anything creates a window.
+    * CoInitialize below can create a hidden OLE message window on
+    * some STA configurations; once any HWND exists, the DPI setting
+    * is locked and GetDeviceCaps will report a fixed 96 DPI. */
+   {
+      extern void win32_apply_dpi_awareness(void);
+      win32_apply_dpi_awareness();
+   }
+   if (FAILED(CoInitialize(NULL)))
+   {
+      RARCH_ERR("FATAL: Failed to initialize the COM interface.\n");
+      return 1;
+   }
+#endif
+
+#if defined(WEBOS)
+   /* compatibility with webOS 1 and 2 */
+   const char *home = getenv("HOME");
+   const char *appId = getenv("APPID");
+   char new_path[PATH_MAX_LENGTH];
+
+   if (home)
+   {
+      if (!appId || !*appId || strcmp(appId, "com.palm.devmode.openssh") == 0)
+         appId = WEBOS_APP_ID;
+
+      snprintf(new_path, sizeof(new_path), "/%s/.config", home);
+      if (access(new_path, F_OK) != 0 && mkdir(new_path, 0775) != 0)
+      {
+         snprintf(new_path, sizeof(new_path), "/media/developer/temp/webosbrew/%s", appId);
+         if (mkdir_p(new_path, 0775) != 0 && errno != EEXIST)
+            RARCH_WARN("[webOS]: Unable to write to '%s': %s\n", new_path, strerror(errno));
+         else
+            setenv("HOME", new_path, 1);
+      }
+   }
+
+   if (getenv("APPID") == NULL)
+      setenv("APPID", WEBOS_APP_ID, 0);
+   /* compatibility with webOS 3 - 5 */
+   if (getenv("EGL_PLATFORM") == NULL)
+      setenv("EGL_PLATFORM", "wayland", 0);
+   if (getenv("XDG_RUNTIME_DIR") == NULL)
+      setenv("XDG_RUNTIME_DIR", "/tmp/xdg", 0);
+   /* wayland */
+   if (getenv("XKB_CONFIG_ROOT") == NULL)
+      setenv("XKB_CONFIG_ROOT", "/usr/share/X11/xkb", 0);
+   if (getenv("WAYLAND_DISPLAY") == NULL)
+      setenv("WAYLAND_DISPLAY", "wayland-0", 0);
+
+   struct rlimit limit = {0, 0};
+   setrlimit(RLIMIT_CORE, &limit);
+#endif
+
+   rtime_init();
+
+#if defined(HAVE_MIST)
+   steam_init();
+#endif
+
+   libretro_free_system_info(&runloop_st->system.info);
+   command_event(CMD_EVENT_HISTORY_DEINIT, NULL);
+   retroarch_favorites_deinit();
+
+   retroarch_config_init();
+
+   retroarch_deinit_drivers(&runloop_st->retro_ctx);
+   retroarch_ctl(RARCH_CTL_STATE_FREE,  NULL);
+   global_free(p_rarch);
+
+   frontend_driver_init_first(data);
+
+   /* Early display server init — allows querying display metrics
+    * (resolution, DPI, refresh rate) before the video driver creates
+    * a window.  The frontend provides get_display_type() to determine
+    * the platform's display type without needing a window. */
+   {
+      frontend_state_t *frontend_st = frontend_state_get_ptr();
+      if (     frontend_st
+            && frontend_st->current_frontend_ctx
+            && frontend_st->current_frontend_ctx->get_display_type)
+      {
+         enum rarch_display_type dtype =
+            frontend_st->current_frontend_ctx->get_display_type();
+         video_display_server_init(dtype);
+      }
+   }
+
+   if (runloop_is_inited())
+      driver_uninit(DRIVERS_CMD_ALL, (enum driver_lifetime_flags)0);
+
+   video_state_get_ptr()->main_flags |=  VIDEO_FLAG_ACTIVE;
+   AUDIO_FLAGS_SET(audio_state_get_ptr(), AUDIO_FLAG_ACTIVE);
+
+   {
+      int i;
+      for (i = 0; i < MAX_USERS; i++)
+         input_config_set_device(i, RETRO_DEVICE_JOYPAD);
+   }
+
+   runloop_msg_queue_init();
+
+#ifdef HAVE_SMBCLIENT
+   retroarch_smb_init();
+#endif
+#ifdef HAVE_NFSCLIENT
+   retroarch_nfs_init();
+#endif
+
+   if (frontend_state_get_ptr()->current_frontend_ctx)
+   {
+      content_ctx_info_t info;
+
+      info.argc            = argc;
+      info.argv            = argv;
+      info.args            = data;
+      info.environ_get     = frontend_state_get_ptr()->current_frontend_ctx->environment_get;
+
+      if (!task_push_load_content_from_cli(
+               NULL,
+               NULL,
+               &info,
+               CORE_TYPE_PLAIN,
+               NULL,
+               NULL))
+         return 1;
+   }
+
+   settings = config_get_ptr();
+
+   ui_companion_driver_init_first(
+#ifdef HAVE_COMPANION_WIMP
+         settings->bools.desktop_menu_enable,
+         settings->bools.ui_companion_toggle,
+#else
+         false,
+         false,
+#endif
+         settings->bools.ui_companion_start_on_boot
+         );
+#ifdef HAVE_CLOUDSYNC
+   if (rarch_st.flags & RARCH_FLAGS_CLOUD_SYNC_AT_INIT)
+      rarch_st.flags &= ~RARCH_FLAGS_CLOUD_SYNC_AT_INIT;
+   else if (settings->uints.cloud_sync_sync_mode == CLOUD_SYNC_MODE_AUTOMATIC)
+      task_push_cloud_sync(NULL, NULL);
+#endif
+#ifdef HAVE_LAKKA
+   sd_notify(0, "READY=1");
+#endif
+#if !defined(HAVE_MAIN) || defined(HAVE_QT)
+   for (;;)
+   {
+      int ret;
+      bool app_exit     = false;
+      ui_companion_driver_wimp_iterate();
+      ret = runloop_iterate();
+
+      task_queue_check();
+
+#ifdef HAVE_MIST
+   steam_poll();
+#endif
+
+      /* Whichever desktop companion is active, not Qt specifically. */
+      app_exit = ui_companion_driver_wimp_exiting();
+
+      if (ret == -1 || app_exit)
+      {
+         ui_companion_driver_wimp_quit();
+         break;
+      }
+   }
+
+   /* Close the desktop companion window while its message pump and the
+    * drivers are still alive; leaving it for main_exit's teardown lets a
+    * native (Win32) companion window outlive the pump and hang. */
+   ui_companion_driver_wimp_deinit();
+
+   main_exit(data);
+#endif
+
+   return 0;
+}
+
+#if defined(__EMSCRIPTEN__)
+
+bool platform_emscripten_finish_deferred_sleep(void);
+
+#ifdef EMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
+#ifdef HAVE_AUDIOWORKLET
+bool audioworklet_external_block(void);
+#endif
+#ifdef HAVE_RWEBAUDIO
+bool rwebaudio_external_block(void);
+#endif
+#endif
+
+#ifdef HAVE_RWEBAUDIO
+void rwebaudio_recalibrate_time(void);
+#endif
+
+void emscripten_mainloop(void)
+{
+   int ret;
+   static unsigned emscripten_frame_count = 0;
+   video_driver_state_t *video_st         = video_state_get_ptr();
+   settings_t        *settings            = config_get_ptr();
+   input_driver_state_t *input_st         = input_state_get_ptr();
+   bool black_frame_insertion             = settings->uints.video_black_frame_insertion;
+   bool input_driver_nonblock_state       = input_st ?
+      (input_st->flags & INP_FLAG_NONBLOCKING) : false;
+   uint32_t runloop_flags                 = runloop_get_flags();
+   bool runloop_is_slowmotion             = (runloop_flags & RUNLOOP_FLAG_SLOWMOTION) ? true : false;
+   bool runloop_is_paused                 = (runloop_flags & RUNLOOP_FLAG_PAUSED)     ? true : false;
+
+   /* Prevents the program from running in any of the following conditions:
+    * 1. The window is not visible.
+    * 2. The GL context is lost and hasn't been recovered yet. */
+   if (platform_emscripten_should_drop_iter())
+      return;
+
+   if (platform_emscripten_finish_deferred_sleep())
+      return;
+
+#ifdef HAVE_RWEBAUDIO
+   rwebaudio_recalibrate_time();
+#endif
+
+#ifdef EMSCRIPTEN_AUDIO_FAKE_BLOCK
+#ifdef HAVE_AUDIOWORKLET
+   if (audioworklet_external_block())
+      return;
+#endif
+#ifdef HAVE_RWEBAUDIO
+   if (rwebaudio_external_block())
+      return;
+#endif
+#endif
+
+   emscripten_frame_count++;
+
+   /* Disable BFI during fast forward, slow-motion,
+    * and pause to prevent flicker. */
+   if (
+             black_frame_insertion
+         && !input_driver_nonblock_state
+         && !runloop_is_slowmotion
+         && !runloop_is_paused)
+   {
+      if ((emscripten_frame_count % (black_frame_insertion+1)) != 0)
+      {
+         gl_clear();
+         if (video_st->current_video_context.swap_buffers)
+            video_st->current_video_context.swap_buffers(
+                  video_st->context_data);
+#ifdef PROXY_TO_PTHREAD
+         platform_emscripten_wait_for_frame();
+#endif
+         return;
+      }
+   }
+
+   ret = runloop_iterate();
+
+#ifdef EMSCRIPTEN_AUDIO_ASYNC_BLOCK
+#ifdef HAVE_AUDIOWORKLET
+   audioworklet_external_block();
+#endif
+#ifdef HAVE_RWEBAUDIO
+   rwebaudio_external_block();
+#endif
+#endif
+
+   task_queue_check();
+
+   if (ret == -1)
+   {
+      main_exit(NULL);
+      emscripten_force_exit(0);
+      return;
+   }
+
+#ifdef PROXY_TO_PTHREAD
+   /* Sync with requestAnimationFrame on browser thread if vsync is on. */
+   /* Performance seems better with this wait at the end of the iter. */
+   platform_emscripten_wait_for_frame();
+#endif
+}
+#endif
+
+#ifndef HAVE_MAIN
+#ifdef __cplusplus
+extern "C"
+#endif
+int main(int argc, char *argv[])
+{
+#ifdef HAVE_WINUSB_BIND
+   /* the copy started with administrator rights to move a DualShock 3
+    * to WinUSB or back (winusb_bind_request()), or an installer's */
+   int ret;
+   if (argc == 2 && winusb_bind_command(argv[1], &ret))
+      return ret;
+#endif
+   return rarch_main(argc, argv, NULL);
+}
+#endif
+
+/* DYNAMIC LIBRETRO CORE  */
+
+const struct retro_subsystem_info *libretro_find_subsystem_info(
+      const struct retro_subsystem_info *info, unsigned num_info,
+      const char *ident)
+{
+   size_t i;
+   for (i = 0; i < num_info; i++)
+   {
+      if (     string_is_equal(info[i].ident, ident)
+            || string_is_equal(info[i].desc,  ident)
+         )
+         return &info[i];
+   }
+
+   return NULL;
+}
+
+/**
+ * libretro_find_controller_description:
+ * @info                         : Pointer to controller info handle.
+ * @id                           : Identifier of controller to search
+ *                                 for.
+ *
+ * Search for a controller of type @id in @info.
+ *
+ * Leaf function.
+ *
+ * @return controller description of found controller on success,
+ * otherwise NULL.
+ **/
+const struct retro_controller_description *
+libretro_find_controller_description(
+      const struct retro_controller_info *info, unsigned id)
+{
+   size_t i;
+   for (i = 0; i < info->num_types; i++)
+   {
+      if (info->types[i].id == id)
+         return &info->types[i];
+   }
+   return NULL;
+}
+
+/**
+ * libretro_free_system_info:
+ * @info                         : Pointer to system info information.
+ *
+ * Frees system information.
+ **/
+void libretro_free_system_info(struct retro_system_info *sysinfo)
+{
+   if (!sysinfo)
+      return;
+
+   /* The three strings are not owned here and never were.  Both paths
+    * that fill this struct leave pointers that cannot be free()d:
+    * libretro_get_system_info() copies into the fixed buffers inside
+    * runloop_state and assigns their addresses, and the core's own
+    * retro_get_system_info() returns its static literals, as do the
+    * MSG_UNKNOWN and "v0" fallbacks applied after it.  free()ing them
+    * is a free() of something malloc() never returned:
+    *
+    *   AddressSanitizer: SEGV in __asan::Allocator::Deallocate
+    *     #5 libretro_free_system_info retroarch.c
+    *     #6 menu_driver_ctl menu/menu_driver.c
+    *
+    * Clearing the struct is the whole of what this has to do.  Both
+    * callers already memset() it straight afterwards, which is what
+    * kept the missing ownership from being obvious. */
+   memset(sysinfo, 0, sizeof(*sysinfo));
+}
+
+#define _PSUPP_BUF(buf, len, var, name, desc) snprintf(buf + len, sizeof(buf) - len, "  %-15s - %s: %s", name, desc, var ? "yes\n" : "no\n")
+
+static void retroarch_print_features(void)
+{
+   size_t _len;
+   char buf[4096];
+
+   frontend_driver_attach_console();
+
+   _len  = strlcpy_lit(buf, "Features:\n", sizeof(buf));
+#ifdef HAVE_DYLIB
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_DYLIB,           "Dylib",           "External filter and plugin support");
+#endif
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_DYNAMIC,         "Dynamic",         "Dynamic run-time loading of libretro library");
+#ifdef HAVE_LIBRETRODB
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_LIBRETRODB,      "LibretroDB",      "LibretroDB support");
+#endif
+#ifdef HAVE_THREADS
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_THREAD,          "Threads",         "Threading support");
+#endif
+#ifdef HAVE_OVERLAY
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_OVERLAY,         "Overlay",         "Overlay support");
+#endif
+#ifdef HAVE_COMMAND
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_COMMAND,         "Command",         "Command interface support");
+#endif
+#ifdef HAVE_NETWORK_CMD
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_NETWORK_COMMAND, "Network Command", "Network Command interface support");
+#endif
+#ifdef HAVE_NETWORKGAMEPAD
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_NETWORK_GAMEPAD, "Network Gamepad", "Network Controller support");
+#endif
+#ifdef HAVE_NETWORKING
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_NETPLAY,         "Netplay",         "Peer-to-peer netplay");
+#endif
+#ifdef HAVE_SSL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SSL,             "SSL",             "SSL Support");
+#endif
+#ifdef HAVE_CG
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_CG,              "Cg",              "Fragment/vertex shader driver");
+#endif
+#ifdef HAVE_GLSL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_GLSL,            "GLSL",            "Fragment/vertex shader driver");
+#endif
+#ifdef HAVE_HLSL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_HLSL,            "HLSL",            "Fragment/vertex shader driver");
+#endif
+#ifdef HAVE_SLANG
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SLANG,           "Slang",           "Fragment/vertex shader driver");
+#endif
+#ifdef HAVE_RPNG
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RPNG,            "RPNG",            "PNG (RPNG) image loading/encoding");
+#endif
+#ifdef HAVE_RJPEG
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RJPEG,           "RJPEG",           "JPEG (RJPEG) image loading");
+#endif
+#ifdef HAVE_RBMP
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RBMP,            "RBMP",            "BMP (RBMP) image loading/encoding");
+#endif
+#ifdef HAVE_RTGA
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RTGA,            "RTGA",            "TGA (RTGA) image loading/encoding");
+#endif
+#ifdef HAVE_RWEBP
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RWEBP,           "RWEBP",           "WebP (RWEBP) image loading");
+#endif
+#ifdef HAVE_RDDS
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RDDS,            "RDDS",            "DDS (RDDS) image loading");
+#endif
+#ifdef HAVE_SDL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SDL,             "SDL1",            "SDL1 input/audio/video drivers");
+#endif
+#ifdef HAVE_SDL2
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SDL2,            "SDL2",            "SDL2 input/audio/video drivers");
+#endif
+#ifdef HAVE_SDL3
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SDL3,            "SDL3",            "SDL3 input/audio/video drivers");
+#endif
+#ifdef HAVE_X11
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_X11,             "X11",             "X11 input/video drivers");
+#endif
+#ifdef HAVE_UDEV
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_UDEV,            "udev",            "udev/evdev input driver");
+#endif
+#ifdef HAVE_WAYLAND
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_WAYLAND,         "Wayland",         "Wayland input/video drivers");
+#endif
+#ifdef HAVE_GDI
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_GDI,             "GDI",             "Video driver");
+#endif
+#endif
+#ifdef HAVE_D3D8
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_D3D8,            "Direct3D 8",      "Video driver");
+#endif
+#ifdef HAVE_D3D9
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_D3D9,            "Direct3D 9",      "Video driver");
+#endif
+#ifdef HAVE_D3D10
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_D3D10,           "Direct3D 10",     "Video driver");
+#endif
+#ifdef HAVE_D3D11
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_D3D11,           "Direct3D 11",     "Video driver");
+#endif
+#ifdef HAVE_D3D12
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_D3D12,           "Direct3D 12",     "Video driver");
+#endif
+#ifdef HAVE_VULKAN
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_VULKAN,          "Vulkan",          "Video driver");
+#endif
+#ifdef HAVE_METAL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_METAL,           "Metal",           "Video driver");
+#endif
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGL1) || defined(HAVE_OPENGL_CORE)
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_OPENGL,          "OpenGL",          "Video driver");
+#endif
+#if defined(HAVE_OPENGLES) || defined(HAVE_OPENGLES2) || defined(HAVE_OPENGLES3) || defined(HAVE_OPENGLES3_1) || defined(HAVE_OPENGLES3_2)
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_OPENGLES,        "OpenGLES",        "Video driver");
+#endif
+#ifdef HAVE_XVIDEO
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_XVIDEO,          "XVideo",          "Video driver");
+#endif
+#ifdef HAVE_EGL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_EGL,             "EGL",             "Video context driver");
+#endif
+#ifdef HAVE_KMS
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_KMS,             "KMS",             "Video context driver");
+#endif
+#ifdef HAVE_VG
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_VG,              "OpenVG",          "Video context driver");
+#endif
+#ifdef HAVE_ALSA
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_ALSA,            "ALSA",            "Audio driver");
+#endif
+#ifdef HAVE_COREAUDIO
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_COREAUDIO,       "CoreAudio",       "Audio driver");
+#endif
+#ifdef HAVE_JACK
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_JACK,            "JACK",            "Audio driver");
+#endif
+#ifdef HAVE_AL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_AL,              "OpenAL",          "Audio driver");
+#endif
+#ifdef HAVE_SL
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SL,              "OpenSL",          "Audio driver");
+#endif
+#ifdef HAVE_OSS
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_OSS,             "OSS",             "Audio driver");
+#endif
+#ifdef HAVE_PIPEWIRE
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_PIPEWIRE,        "PipeWire",        "Audio driver");
+#endif
+#ifdef HAVE_PULSE
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_PULSE,           "PulseAudio",      "Audio driver");
+#endif
+#ifdef HAVE_ROAR
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_ROAR,            "RoarAudio",       "Audio driver");
+#endif
+#ifdef HAVE_RSOUND
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RSOUND,          "RSound",          "Audio driver");
+#endif
+#ifdef HAVE_DSOUND
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_DSOUND,          "DirectSound",     "Audio driver");
+#endif
+#ifdef HAVE_WASAPI
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_WASAPI,          "WASAPI",          "Audio driver");
+#endif
+#ifdef HAVE_XAUDIO
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_XAUDIO,          "XAudio2",         "Audio driver");
+#endif
+#ifdef HAVE_CHD
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_CHD,             "CHD",             "CHD support");
+#endif
+#ifdef HAVE_7ZIP
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_7ZIP,            "7zip",            "7zip support");
+#endif
+#ifdef HAVE_ZLIB
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_ZLIB,            "zlib",            "zlib support");
+#endif
+#ifdef HAVE_RZSTD
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_ZSTD,            "zstd",            "Zstandard support");
+#endif
+#ifdef HAVE_RBZIP2
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_BZIP2,           "bzip2",           "bzip2 support");
+#endif
+#ifdef HAVE_RRAR
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_RAR,             "rar",             "RAR support");
+#endif
+#ifdef HAVE_FFMPEG
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_FFMPEG,          "FFmpeg",          "On-the-fly recording of gameplay with libavcodec");
+#endif
+#ifdef HAVE_MPV
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_MPV,             "mpv",             "Cross-platform media player");
+#endif
+#ifdef HAVE_SDL_IMAGE
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_SDL_IMAGE,       "SDL_image",       "SDL_image image loading");
+#endif
+#ifdef HAVE_CORETEXT
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_CORETEXT,        "CoreText",        "TTF font rendering driver");
+#endif
+#ifdef HAVE_FREETYPE
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_FREETYPE,        "FreeType",        "TTF font rendering driver");
+#endif
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_STBFONT,         "STB TrueType",    "TTF font rendering driver");
+#ifdef HAVE_V4L2
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_V4L2,            "Video4Linux2",    "Camera driver");
+#endif
+#ifdef HAVE_LIBUSB
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_LIBUSB,          "libusb",          "libusb support");
+#endif
+#ifdef HAVE_COCOA
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_COCOA,           "Cocoa",           "Cocoa UI companion support (for OSX and/or iOS)");
+#endif
+#ifdef HAVE_QT
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_QT,              "Qt",              "Qt UI companion support");
+#endif
+#ifdef HAVE_QT6
+   _len += _PSUPP_BUF(buf, _len, SUPPORTS_QT6,             "Qt6",             "Qt 6.x support");
+#endif
+
+   fputs(buf, stdout);
+}
+
+static void retroarch_print_version(void)
+{
+   char str[256];
+   str[0] = '\0';
+
+   frontend_driver_attach_console();
+
+   fprintf(stdout, "%s - %s\n",
+         msg_hash_to_str(MSG_PROGRAM),
+         msg_hash_to_str(MSG_LIBRETRO_FRONTEND));
+
+   fprintf(stdout, "Version: %s", PACKAGE_VERSION);
+#ifdef HAVE_GIT_VERSION
+   fprintf(stdout, " (Git %s)", retroarch_git_version);
+#endif
+   fprintf(stdout, " " __DATE__ "\n");
+
+   retroarch_get_capabilities(RARCH_CAPABILITIES_COMPILER, str, sizeof(str));
+   fprintf(stdout, "%s\n", str);
+}
+
+/**
+ * retroarch_print_help:
+ *
+ * Prints help message explaining the program's commandline switches.
+ **/
+static void retroarch_print_help(const char *arg0)
+{
+   char buf[2048];
+   size_t _len = 0;
+   buf[0]      = '\0';
+
+   frontend_driver_attach_console();
+   fputs("\n", stdout);
+   puts("===================================================================");
+   retroarch_print_version();
+   puts("===================================================================");
+   fputs("\n", stdout);
+
+   fprintf(stdout, "Usage: %s [OPTIONS]... [FILE]\n\n", arg0);
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -h, --help                     "
+         "Show this help message.\n"
+         "  -v, --verbose                  "
+         "Verbose logging.\n"
+         "      --log-file=FILE            "
+         "Log messages to FILE.\n"
+         "  -V, --version                  "
+         "Show version.\n"
+         "      --features                 "
+         "Print available features compiled into program.\n");
+#ifdef HAVE_MENU
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --menu                     "
+         "Do not require content or libretro core to be loaded,\n"
+         "                                 "
+         "  starts directly in menu. If no arguments are passed to\n"
+         "                                 "
+         "  the program, it is equivalent to using --menu as only argument.\n");
+#endif
+
+#ifdef HAVE_CONFIGFILE
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -c, --config=FILE              "
+         "Path for config file.\n");
+#ifdef _WIN32
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "                                 "
+         "  Defaults to retroarch.cfg in same directory as retroarch.exe.\n"
+         "                                 "
+         "  If a default config is not found, the program will attempt to create one.\n");
+#else
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "                                 "
+         "  By default looks for config in\n"
+         "                                 "
+         "  $XDG_CONFIG_HOME/retroarch/retroarch.cfg,\n"
+         "                                 "
+         "  $HOME/.config/retroarch/retroarch.cfg, and\n"
+         "                                 "
+         "  $HOME/.retroarch.cfg.\n"
+         "                                 "
+         "  If a default config is not found, the program will attempt to create one\n"
+         "                                 "
+         "  based on the skeleton config (" GLOBAL_CONFIG_DIR "/retroarch.cfg).\n");
+#endif
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --appendconfig=FILE        "
+         "Extra config files are loaded in, and take priority over\n"
+         "                                 "
+         "  config selected in -c (or default). Multiple configs are\n"
+         "                                 "
+         "  delimited by '|'. Their settings are written to the main\n"
+         "                                 "
+         "  config whenever it is saved, on exit included. To keep\n"
+         "                                 "
+         "  them out of it, put config_save_on_exit = \"false\" in\n"
+         "                                 "
+         "  the appended file.\n");
+#endif
+
+   fputs(buf, stdout);
+   buf[0] = '\0';
+   _len   = 0;
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --subsystem=NAME           "
+         "Use a subsystem of the libretro core. Multiple content\n"
+         "                                 "
+         "  files are loaded as multiple arguments. If a content\n"
+         "                                 "
+         "  file is skipped, use a blank (\"\") command line argument.\n");
+
+#ifdef HAVE_DYNAMIC
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -L, --libretro=FILE            "
+         "Path to libretro implementation. Overrides any config setting.\n"
+         "                                 "
+         "  FILE may be one of the following:\n"
+         "                                 "
+         "  1. The full path to a core shared object library: path/to/<core_name>_libretro.<lib_ext>\n"
+         "                                 "
+         "  2. A core shared object library 'file name' (*): <core_name>_libretro.<lib_ext>\n");
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "                                 "
+         "  3. A core 'short name' (*): <core_name>_libretro OR <core_name>\n"
+         "                                 "
+         "  (*) If 'file name' or 'short name' do not correspond to an existing full file path,\n"
+         "                                 "
+         "  the configured frontend 'cores' directory will be searched for a match.\n");
+#endif
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "                                 "
+         "  Content must be loaded in an order which depends on the\n"
+         "                                 "
+         "  particular subsystem used. See verbose log output to learn\n"
+         "                                 "
+         "  how a particular subsystem wants content to be loaded.\n");
+
+#ifdef HAVE_LIBRETRODB
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --scan=PATH|FILE           "
+         "Import content from path.\n");
+#endif
+#ifdef HAVE_CLOUDSYNC
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --cloudsync                "
+         "Run a cloud sync, then exit.\n");
+#endif
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -f, --fullscreen               "
+         "Start the program in fullscreen regardless of config setting.\n"
+         "      --set-shader=PATH          "
+         "Path to a shader (preset) that will be loaded each time content is loaded.\n"
+         "                                 "
+         "  Effectively overrides automatic shader presets.\n"
+         "                                 "
+         "  An empty argument \"\" will disable automatic shader presets.\n");
+
+   fputs(buf, stdout);
+   buf[0] = '\0';
+   _len   = 0;
+
+   _len += snprintf(buf + _len, sizeof(buf) - _len,"  -N, --nodevice=PORT            "
+         "Disconnects controller device connected to PORT (1 to %d).\n", MAX_USERS);
+   if (_len >= sizeof(buf))
+      _len = sizeof(buf) - 1;
+   _len += snprintf(buf + _len, sizeof(buf) - _len,"  -A, --dualanalog=PORT          "
+         "Connect a DualAnalog controller to PORT (1 to %d).\n", MAX_USERS);
+   if (_len >= sizeof(buf))
+      _len = sizeof(buf) - 1;
+   _len += snprintf(buf + _len, sizeof(buf) - _len,"  -d, --device=PORT:ID           "
+         "Connect a generic device into PORT of the device (1 to %d).\n", MAX_USERS);
+   if (_len >= sizeof(buf))
+      _len = sizeof(buf) - 1;
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "                                 "
+         "  Format is PORT:ID, where ID is a number corresponding to the particular device.\n"
+         "  -M, --sram-mode=MODE           "
+         "SRAM handling mode. MODE can be:\n"
+         "                                 "
+         "  'noload-nosave', 'noload-save', 'load-nosave' or 'load-save'.\n"
+         "                                 "
+         "  Note: 'noload-save' implies that save files *WILL BE OVERWRITTEN*.\n");
+
+#ifdef HAVE_NETWORKING
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -H, --host                     "
+         "Host netplay as user 1.\n"
+         "  -C, --connect=HOST             "
+         "Connect to netplay server as user 2.\n"
+         "      --port=PORT                "
+         "Port used to netplay. Default is 55435.\n"
+         "      --mitm-session=ID           "
+         "MITM (relay) session ID to join.\n"
+         "      --nick=NICK                "
+         "Picks a username (for use with netplay). Not mandatory.\n"
+         "      --check-frames=NUMBER      "
+         "Check frames when using netplay.\n");
+#ifdef HAVE_NETWORK_CMD
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --command                  "
+         "Sends a command over UDP to an already running program process.\n"
+         "                                 "
+         "  Available commands are listed if command is invalid.\n");
+#endif
+#endif
+
+#ifdef HAVE_BSV_MOVIE
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -P, --play-replay=FILE         "
+         "Playback a replay file.\n"
+         "  -R, --record-replay=FILE       "
+         "Start recording a replay file from the beginning.\n"
+         "      --eof-exit                 "
+         "Exit upon reaching the end of the replay file.\n");
+#endif
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -r, --record=FILE              "
+         "Path to record video file. Using mkv extension is recommended.\n"
+         "      --recordconfig             "
+         "Path to settings used during recording.\n"
+         "      --size=WIDTHxHEIGHT        "
+         "Overrides output video size when recording.\n");
+
+   fputs(buf, stdout);
+   buf[0] = '\0';
+   _len   = 0;
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -D, --detach                   "
+         "Detach program from the running console. Not relevant for all platforms.\n"
+         "      --max-frames=NUMBER        "
+         "Runs for the specified number of frames, then exits.\n");
+#ifdef HAVE_MCP
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --mcp-stdio                "
+         "Serves MCP on stdin and stdout, for a client that starts RetroArch.\n");
+#endif
+
+#ifdef HAVE_PATCH
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "  -U, --ups=FILE                 "
+         "Specifies path for UPS patch that will be applied to content.\n"
+         "      --bps=FILE                 "
+         "Specifies path for BPS patch that will be applied to content.\n"
+         "      --ips=FILE                 "
+         "Specifies path for IPS patch that will be applied to content.\n");
+#ifdef HAVE_XDELTA
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --xdelta=FILE              "
+         "Specifies path for Xdelta patch that will be applied to content.\n");
+#endif /* HAVE_XDELTA */
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --no-patch                 "
+         "Disables all forms of content patching.\n");
+#endif /* HAVE_PATCH */
+
+#ifdef HAVE_SCREENSHOTS
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --max-frames-ss            "
+         "Takes a screenshot at the end of max-frames.\n"
+         "      --max-frames-ss-path=FILE  "
+         "Path to save the screenshot to at the end of max-frames.\n");
+#endif
+
+#ifdef HAVE_ACCESSIBILITY
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --accessibility            "
+         "Enables accessibility for blind users using text-to-speech.\n");
+#endif
+
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "      --load-menu-on-error       "
+         "Open menu instead of quitting if specified core or content fails to load.\n"
+         "  -e, --entryslot=NUMBER         "
+         "Slot from which to load an entry state.\n"
+         "  -s, --save=PATH                "
+         "Path for save files (*.srm). (DEPRECATED, use --appendconfig and savefile_directory)\n"
+         "  -S, --savestate=PATH           "
+         "Path for the save state files (*.state). (DEPRECATED, use --appendconfig and savestate_directory)\n");
+
+   /* Flush buffer here to avoid the error "error: string length ‘752’
+    * is greater than the length ‘509’ ISO C90 compilers are required
+    * to support" */
+   fputs(buf, stdout);
+
+#if defined(__linux__) || defined(__GNU__) || (defined(BSD) && !defined(__MACH__))
+   buf[0] = '\0';
+   _len   = 0;
+   strlcpy_append(buf, sizeof(buf), &_len,
+         "\nThe following environment variables are supported:\n\n"
+         "  LIBRETRO_ASSETS_DIRECTORY\n"
+         "  LIBRETRO_AUTOCONFIG_DIRECTORY\n"
+         "  LIBRETRO_CHEATS_DIRECTORY\n"
+         "  LIBRETRO_DATABASE_DIRECTORY\n"
+         "  LIBRETRO_DIRECTORY\n"
+         "  LIBRETRO_SYSTEM_DIRECTORY\n"
+         "  LIBRETRO_VIDEO_FILTER_DIRECTORY\n"
+         "  LIBRETRO_VIDEO_SHADER_DIRECTORY\n\n"
+         "Refer to `man 6 retroarch' for a description of what they do.\n");
+   fputs(buf, stdout);
+#endif
+}
+
+#ifdef HAVE_DYNAMIC
+static void retroarch_parse_input_libretro_path(
+      struct rarch_state *p_rarch,
+      const char *path, size_t path_len)
+{
+   settings_t *settings   = config_get_ptr();
+   int path_stats         = 0;
+   const char *path_ext   = NULL;
+   core_info_t *core_info = NULL;
+   const char *core_path  = NULL;
+   bool core_path_matched = false;
+   char tmp_path[PATH_MAX_LENGTH];
+
+   if (!path || !*path)
+      goto end;
+
+   /* Check if path refers to a built-in core */
+   if (string_ends_with_size(path, "builtin",
+            path_len, STRLEN_CONST("builtin")))
+   {
+      RARCH_LOG("--libretro argument \"%s\" is a built-in core. Ignoring.\n",
+            path);
+      return;
+   }
+
+   path_stats = path_stat(path);
+
+   /* Check if path is a directory */
+   if (
+       ((path_stats & RETRO_VFS_STAT_IS_DIRECTORY) != 0)
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
+       && !string_ends_with(path, ".framework")
+#endif
+       )
+   {
+      path_clear(RARCH_PATH_CORE);
+
+      configuration_set_string(settings,
+            settings->paths.directory_libretro, path);
+
+      retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO, NULL);
+      retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO_DIRECTORY, NULL);
+
+      RARCH_WARN("Using old --libretro behavior. "
+            "Setting libretro_directory to \"%s\" instead.\n",
+            path);
+      return;
+   }
+
+   /* Check if path is a valid file */
+   if ((path_stats & RETRO_VFS_STAT_IS_VALID) != 0)
+   {
+      core_path = path;
+      goto end;
+   }
+
+   /* If path refers to a core file that does not exist,
+    * check for its presence in the user-defined cores
+    * directory */
+   path_ext = path_get_extension(path);
+
+   if (path_ext && *path_ext)
+   {
+      char core_ext[16];
+      if (   !*settings->paths.directory_libretro
+          || !frontend_driver_get_core_extension(core_ext,
+               sizeof(core_ext))
+          || !string_is_equal(path_ext, core_ext))
+         goto end;
+
+      fill_pathname_join_special(tmp_path, settings->paths.directory_libretro,
+            path, sizeof(tmp_path));
+
+      if (!*tmp_path)
+         goto end;
+
+      path_stats = path_stat(tmp_path);
+
+      if (   (path_stats & RETRO_VFS_STAT_IS_VALID)     != 0
+          && (path_stats & RETRO_VFS_STAT_IS_DIRECTORY) == 0)
+      {
+         core_path         = tmp_path;
+         core_path_matched = true;
+         goto end;
+      }
+   }
+   else
+   {
+      size_t _len;
+      /* If path has no extension and contains no path
+       * delimiters, check if it is a core 'name', matching
+       * an existing file in the cores directory */
+      if (find_last_slash(path))
+         goto end;
+      /* First check for built-in cores */
+      if (!memcmp(path, "ffmpeg", STRLEN_CONST("ffmpeg")))
+      {
+         runloop_set_current_core_type(CORE_TYPE_FFMPEG, true);
+         return;
+      }
+      else if (!memcmp(path, "mpv", STRLEN_CONST("mpv")))
+      {
+         runloop_set_current_core_type(CORE_TYPE_MPV, true);
+         return;
+      }
+      else if (!memcmp(path, "webm", STRLEN_CONST("webm")))
+      {
+         runloop_set_current_core_type(CORE_TYPE_WEBM, true);
+         return;
+      }
+      else if (!memcmp(path, "imageviewer", STRLEN_CONST("imageviewer")))
+      {
+         runloop_set_current_core_type(CORE_TYPE_IMAGEVIEWER, true);
+         return;
+      }
+      if (!memcmp(path, "netretropad", STRLEN_CONST("netretropad")))
+      {
+         runloop_set_current_core_type(CORE_TYPE_NETRETROPAD, true);
+         return;
+      }
+      else if (!memcmp(path, "videoprocessor", STRLEN_CONST("videoprocessor")))
+      {
+         runloop_set_current_core_type(CORE_TYPE_VIDEO_PROCESSOR, true);
+         return;
+      }
+      command_event(CMD_EVENT_CORE_INFO_INIT, NULL);
+      _len = strlcpy(tmp_path, path, sizeof(tmp_path));
+      if (!string_ends_with_size(tmp_path, "_libretro",
+               _len, STRLEN_CONST("_libretro")))
+         strlcpy_lit(tmp_path       + _len,
+               "_libretro",
+               sizeof(tmp_path) - _len);
+      if (  !core_info_find(tmp_path, &core_info)
+            || (!core_info->path || !*core_info->path))
+         goto end;
+      core_path         = core_info->path;
+      core_path_matched = true;
+   }
+
+end:
+   if (core_path && *core_path)
+   {
+      strlcpy(p_rarch->path_libretro, core_path,
+            sizeof(p_rarch->path_libretro));
+      retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO, NULL);
+
+      /* We requested an explicit core, so use PLAIN core type. */
+      runloop_set_current_core_type(CORE_TYPE_PLAIN, false);
+
+      if (core_path_matched)
+         RARCH_LOG("--libretro argument \"%s\" matches core file \"%s\".\n",
+               path, core_path);
+   }
+   else
+      RARCH_WARN("--libretro argument \"%s\" is not a file, core name"
+            " or directory. Ignoring.\n",
+            path ? path : "");
+}
+#endif
+
+#if defined(HAVE_LIBRETRODB) && defined(HAVE_MENU)
+void handle_dbscan_finished(retro_task_t *task,
+      void *task_data, void *user_data, const char *err);
+#endif
+
+#ifdef HAVE_CLOUDSYNC
+/* The sync's verdict, where the waiting caller reads it. */
+static void retroarch_cloud_sync_finished(retro_task_t *task,
+      void *task_data, void *user_data, const char *err)
+{
+   *(int*)user_data = err ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+/* Runs a cloud sync to its end on this thread. Returns EXIT_SUCCESS or
+ * EXIT_FAILURE, or -1 when no sync was queued. */
+static int retroarch_cloud_sync_run(void)
+{
+   int result = -1;
+
+   if (!task_push_cloud_sync(retroarch_cloud_sync_finished, &result))
+      return -1;
+   while (result < 0)
+   {
+      task_queue_check();
+      retro_sleep(10);
+   }
+   return result;
+}
+#endif
+
+/**
+ * retroarch_parse_input_and_config:
+ * @argc                 : Count of (commandline) arguments.
+ * @argv                 : (Commandline) arguments.
+ *
+ * Parses (commandline) arguments passed to program and loads the config file,
+ * with command line options overriding the config file.
+ *
+ **/
+static bool retroarch_parse_input_and_config(
+      struct rarch_state *p_rarch,
+      int argc, char *argv[])
+{
+   unsigned i;
+   static bool           first_run = true;
+   bool verbosity_enabled          = false;
+   const char           *optstring = NULL;
+   bool              explicit_menu = false;
+   bool                 cli_active = false;
+   bool               cli_core_set = false;
+   bool            cli_content_set = false;
+   recording_state_t *rec_st       = recording_state_get_ptr();
+   runloop_state_t     *runloop_st = runloop_state_get_ptr();
+   settings_t          *settings   = config_get_ptr();
+#ifdef HAVE_ACCESSIBILITY
+   access_state_t *access_st       = access_state_get_ptr();
+#endif
+#ifdef HAVE_LIBRETRODB
+   retro_task_callback_t cb_task_dbscan
+                                   = NULL;
+#endif
+
+   const struct option opts[]      = {
+#ifdef HAVE_DYNAMIC
+      { "libretro",           1, NULL, 'L' },
+#endif
+      { "menu",               0, NULL, RA_OPT_MENU },
+      { "help",               0, NULL, 'h' },
+      { "save",               1, NULL, 's' },
+      { "fullscreen",         0, NULL, 'f' },
+      { "record",             1, NULL, 'r' },
+      { "recordconfig",       1, NULL, RA_OPT_RECORDCONFIG },
+      { "size",               1, NULL, RA_OPT_SIZE },
+      { "verbose",            0, NULL, 'v' },
+#ifdef HAVE_CONFIGFILE
+      { "config",             1, NULL, 'c' },
+      { "appendconfig",       1, NULL, RA_OPT_APPENDCONFIG },
+#endif
+      { "nodevice",           1, NULL, 'N' },
+      { "dualanalog",         1, NULL, 'A' },
+      { "device",             1, NULL, 'd' },
+      { "savestate",          1, NULL, 'S' },
+      { "set-shader",         1, NULL, RA_OPT_SET_SHADER },
+#ifdef HAVE_BSV_MOVIE
+      { "play-replay",        1, NULL, 'P' },
+      { "record-replay",      1, NULL, 'R' },
+#endif
+      { "sram-mode",          1, NULL, 'M' },
+#ifdef HAVE_NETWORKING
+      { "host",               0, NULL, 'H' },
+      { "connect",            1, NULL, 'C' },
+      { "mitm-session",       1, NULL, 'T' },
+      { "check-frames",       1, NULL, RA_OPT_CHECK_FRAMES },
+      { "port",               1, NULL, RA_OPT_PORT },
+#ifdef HAVE_NETWORK_CMD
+      { "command",            1, NULL, RA_OPT_COMMAND },
+#endif
+#endif
+      { "nick",               1, NULL, RA_OPT_NICK },
+#ifdef HAVE_PATCH
+      { "ups",                1, NULL, 'U' },
+      { "bps",                1, NULL, RA_OPT_BPS },
+      { "ips",                1, NULL, RA_OPT_IPS },
+#ifdef HAVE_XDELTA
+      { "xdelta",             1, NULL, RA_OPT_XDELTA },
+#endif /* HAVE_XDELTA */
+      { "no-patch",           0, NULL, RA_OPT_NO_PATCH },
+#endif /* HAVE_PATCH */
+      { "detach",             0, NULL, 'D' },
+      { "features",           0, NULL, RA_OPT_FEATURES },
+      { "subsystem",          1, NULL, RA_OPT_SUBSYSTEM },
+      { "max-frames",         1, NULL, RA_OPT_MAX_FRAMES },
+      { "max-frames-ss",      0, NULL, RA_OPT_MAX_FRAMES_SCREENSHOT },
+      { "max-frames-ss-path", 1, NULL, RA_OPT_MAX_FRAMES_SCREENSHOT_PATH },
+      { "eof-exit",           0, NULL, RA_OPT_EOF_EXIT },
+      { "version",            0, NULL, 'V' /* RA_OPT_VERSION */ },
+      { "log-file",           1, NULL, RA_OPT_LOG_FILE },
+      { "accessibility",      0, NULL, RA_OPT_ACCESSIBILITY},
+      { "load-menu-on-error", 0, NULL, RA_OPT_LOAD_MENU_ON_ERROR },
+      { "entryslot",          1, NULL, 'e' },
+#ifdef HAVE_LIBRETRODB
+      { "scan",               1, NULL, RA_OPT_DATABASE_SCAN },
+#endif
+#ifdef HAVE_CLOUDSYNC
+      { "cloudsync",          0, NULL, RA_OPT_CLOUDSYNC },
+#endif
+#ifdef HAVE_MCP
+      { "mcp-stdio",          0, NULL, RA_OPT_MCP_STDIO },
+#endif
+      { NULL, 0, NULL, 0 }
+   };
+
+   if (first_run)
+   {
+      size_t _len = 0;
+      /* Copy the args into a buffer so launch arguments can be reused */
+      for (i = 0; i < (unsigned)argc; i++)
+      {
+         _len += strlcpy(p_rarch->launch_arguments        + _len,
+               argv[i], sizeof(p_rarch->launch_arguments) - _len);
+         _len += strlcpy_lit(p_rarch->launch_arguments        + _len,
+               " ",     sizeof(p_rarch->launch_arguments) - _len);
+      }
+      string_trim_whitespace_left(p_rarch->launch_arguments);
+      string_trim_whitespace_right(p_rarch->launch_arguments);
+
+      first_run  = false;
+
+      /* Command line interface is only considered
+       * to be 'active' (i.e. used by a third party)
+       * if this is the first run (subsequent runs
+       * are triggered by RetroArch itself) */
+      cli_active = true;
+   }
+
+   /* Handling the core type is finicky. Based on the arguments we pass in,
+    * we handle it differently.
+    * Some current cases which track desired behavior and how it is supposed to work:
+    *
+    * Dynamically linked RA:
+    * ./retroarch                            -> CORE_TYPE_DUMMY
+    * ./retroarch -v                         -> CORE_TYPE_DUMMY + verbose
+    * ./retroarch --menu                     -> CORE_TYPE_DUMMY
+    * ./retroarch --menu -v                  -> CORE_TYPE_DUMMY + verbose
+    * ./retroarch -L contentless-core        -> CORE_TYPE_PLAIN
+    * ./retroarch -L content-core            -> CORE_TYPE_PLAIN + FAIL (This currently crashes)
+    * ./retroarch [-L content-core] ROM      -> CORE_TYPE_PLAIN
+    * ./retroarch <-L or ROM> --menu         -> FAIL
+    *
+    * The heuristic here seems to be that if we use the -L CLI option or
+    * optind < argc at the end we should set CORE_TYPE_PLAIN.
+    * To handle --menu, we should ensure that CORE_TYPE_DUMMY is still set
+    * otherwise, fail early, since the CLI options are non-sensical.
+    * We could also simply ignore --menu in this case to be more friendly with
+    * bogus arguments.
+    */
+
+   if (!(runloop_st->flags & RUNLOOP_FLAG_HAS_SET_CORE))
+      runloop_set_current_core_type(CORE_TYPE_DUMMY, false);
+
+   path_clear(RARCH_PATH_SUBSYSTEM);
+   /* A load names its saves after its own content, or after the core
+    * when it has none: the content argument parsed below sets them
+    * again, and -s / -S override them after that. */
+   path_clear(RARCH_PATH_BASENAME);
+   *runloop_st->name.savefile      = '\0';
+   *runloop_st->name.savestate     = '\0';
+   *runloop_st->name.replay        = '\0';
+   *runloop_st->name.cheatfile     = '\0';
+
+   retroarch_override_setting_free_state();
+
+   p_rarch->flags                 &= ~RARCH_FLAGS_HAS_SET_USERNAME;
+#ifdef HAVE_PATCH
+   p_rarch->flags                 &= ~(  RARCH_FLAGS_UPS_PREF | RARCH_FLAGS_IPS_PREF
+                                       | RARCH_FLAGS_BPS_PREF | RARCH_FLAGS_XDELTA_PREF);
+   *runloop_st->name.ups           = '\0';
+   *runloop_st->name.bps           = '\0';
+   *runloop_st->name.ips           = '\0';
+   *runloop_st->name.xdelta        = '\0';
+#endif
+#ifdef HAVE_CONFIGFILE
+   runloop_st->flags              &= ~RUNLOOP_FLAG_OVERRIDES_ACTIVE;
+#endif
+   rarch_st.flags                  &= ~RARCH_FLAGS_CLI_LOAD_MENU_ON_ERR;
+
+   /* Make sure we can call retroarch_parse_input several times ... */
+   optind                          = 0;
+   optstring                       = "hs:fvVS:A:U:DN:d:e:"
+      BSV_MOVIE_ARG NETPLAY_ARG DYNAMIC_ARG FFMPEG_RECORD_ARG CONFIG_FILE_ARG;
+
+#if defined(WEBOS)
+   if (argc > 1 && argv[1][0] == '{')
+   {
+      argv                            = &(argv[1]);
+      argc                            = argc - 1;
+   }
+#endif
+
+#ifndef HAVE_MENU
+   if (argc == 1)
+   {
+      printf("%s\n", msg_hash_to_str(MSG_NO_ARGUMENTS_SUPPLIED_AND_NO_MENU_BUILTIN));
+      retroarch_print_help(argv[0]);
+      exit(0);
+   }
+#endif
+
+   /* First pass: Read the config file path and any directory overrides, so
+    * they're in place when we load the config */
+   if (argc)
+   {
+      for (;;)
+      {
+         int c = getopt_long(argc, argv, optstring, opts, NULL);
+
+#if 0
+         fprintf(stderr, "c is: %c (%d), optarg is: [%s]\n", c, c, (optarg && *optarg) ? optarg : "");
+#endif
+
+         if (c == -1)
+            break;
+
+         /* Graceful failure with empty "-" parameter instead of allowing
+          * to continue to segmentation fault by trying to load content */
+         if (c == 0)
+         {
+            verbosity_enable();
+            fprintf(stderr, "%s\n", msg_hash_to_str(MSG_ERROR_PARSING_ARGUMENTS));
+            fprintf(stderr, "Try '%s --help' for more information\n", argv[0]);
+            exit(EXIT_FAILURE);
+         }
+
+         switch (c)
+         {
+            case 'h':
+               retroarch_print_help(argv[0]);
+               exit(0);
+
+            case 'V':
+            case RA_OPT_VERSION:
+               retroarch_print_version();
+               exit(0);
+
+            case RA_OPT_FEATURES:
+               retroarch_print_features();
+               exit(0);
+
+#ifdef HAVE_CONFIGFILE
+            case 'c':
+               strlcpy(p_rarch->path_config_file, optarg,
+                     sizeof(p_rarch->path_config_file));
+               break;
+            case RA_OPT_APPENDCONFIG:
+               strlcpy(p_rarch->path_config_append_file, optarg,
+                     sizeof(p_rarch->path_config_append_file));
+               break;
+#endif
+
+            case 's':
+               strlcpy(runloop_st->name.savefile, optarg,
+                     sizeof(runloop_st->name.savefile));
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_SAVE_PATH, NULL);
+               break;
+
+            case 'S':
+               strlcpy(runloop_st->name.savestate, optarg,
+                     sizeof(runloop_st->name.savestate));
+               strlcpy(runloop_st->name.replay, optarg,
+                     sizeof(runloop_st->name.replay));
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_STATE_PATH, NULL);
+               break;
+
+            case 'v':
+               verbosity_enable();
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_VERBOSITY, NULL);
+               break;
+            case RA_OPT_LOG_FILE:
+               /* Enable 'log to file' */
+               configuration_set_bool(settings,
+                     settings->bools.log_to_file, true);
+
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_LOG_TO_FILE, NULL);
+
+               /* Cache log file path override */
+               rarch_log_file_set_override(optarg);
+               break;
+
+            case RA_OPT_MENU:
+               explicit_menu = true;
+               break;
+            case RA_OPT_DATABASE_SCAN:
+#ifdef HAVE_LIBRETRODB
+               verbosity_enable();
+               retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_DATABASE_SCAN, NULL);
+#endif
+               break;
+            case RA_OPT_CLOUDSYNC:
+#ifdef HAVE_CLOUDSYNC
+               /* The sync's summary is the command's output. */
+               verbosity_enable();
+               retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_VERBOSITY, NULL);
+#endif
+               break;
+#ifdef HAVE_MCP
+            case RA_OPT_MCP_STDIO:
+               /* before anything else writes to stdout */
+               if (!command_mcp_stdio_claim())
+                  RARCH_ERR("[MCP] Could not take stdin and stdout.\n");
+               break;
+#endif
+
+            /* Must handle '?' otherwise you get an infinite loop */
+            case '?':
+               frontend_driver_attach_console();
+#ifdef _WIN32
+               fprintf(stderr, "\n%s: unrecognized option '%s'\n", argv[0], argv[optind]);
+#endif
+               fprintf(stderr, "Try '%s --help' for more information\n", argv[0]);
+               exit(EXIT_FAILURE);
+               break;
+            /* All other arguments are handled in the second pass */
+         }
+      }
+   }
+   verbosity_enabled = verbosity_is_enabled();
+   /* Enable logging to file if verbosity and log-file arguments were passed.
+    * RARCH_OVERRIDE_SETTING_LOG_TO_FILE is set by the RA_OPT_LOG_FILE case above
+    * The parameters passed to rarch_log_file_init are hardcoded as the config
+    * has not yet been initialized at this point. */
+   if (verbosity_enabled && retroarch_override_setting_is_set(RARCH_OVERRIDE_SETTING_LOG_TO_FILE, NULL))
+      rarch_log_file_init(true, false, NULL);
+
+   /* Flush out some states that could have been set
+    * by core environment variables. */
+   runloop_st->current_core.flags &= ~(RETRO_CORE_FLAG_HAS_SET_INPUT_DESCRIPTORS
+                                     | RETRO_CORE_FLAG_HAS_SET_SUBSYSTEMS);
+
+   /* Reset entry slot */
+   runloop_st->entry_state_slot = -1;
+
+   /* Load the config file now that we know what it is */
+#ifdef HAVE_CONFIGFILE
+   if (!(p_rarch->flags & RARCH_FLAGS_BLOCK_CONFIG_READ))
+#endif
+   {
+      /* Workaround for libdecor 0.2.0 setting unwanted locale */
+#if defined(HAVE_WAYLAND) && defined(HAVE_DYNAMIC)
+      setlocale(LC_NUMERIC,"C");
+#endif
+      /* If this is a static build, load salamander
+       * config file first (sets RARCH_PATH_CORE) */
+#if !defined(HAVE_DYNAMIC)
+      config_load_file_salamander();
+#endif
+      config_load();
+      /* The network clients took their settings before the file was
+       * read (the string fields point at the live buffers, the numeric
+       * ones were copied); hand them the loaded values. */
+#ifdef HAVE_SMBCLIENT
+      retroarch_smb_init();
+#endif
+#ifdef HAVE_NFSCLIENT
+      retroarch_nfs_init();
+#endif
+
+      /* Remember the startup config path so "Save Main
+       * Configuration" can find it after config_replace()
+       * changes RARCH_PATH_CONFIG to a different file. */
+      if (  !path_is_empty(RARCH_PATH_CONFIG)
+          && path_is_empty(RARCH_PATH_CONFIG_DEFAULT))
+         path_set(RARCH_PATH_CONFIG_DEFAULT,
+               path_get(RARCH_PATH_CONFIG));
+   }
+
+   verbosity_enabled = verbosity_is_enabled();
+   /* Init logging after config load only if not overridden by command line argument.
+    * This handles when logging is set in the config but not via the --log-file option. */
+   if (verbosity_enabled && !retroarch_override_setting_is_set(RARCH_OVERRIDE_SETTING_LOG_TO_FILE, NULL))
+      rarch_log_file_init(
+            settings->bools.log_to_file,
+            settings->bools.log_to_file_timestamp,
+            settings->paths.log_dir);
+
+   /* Second pass: All other arguments override the config file */
+   optind = 1;
+
+   if (argc)
+   {
+      for (;;)
+      {
+         int c = getopt_long(argc, argv, optstring, opts, NULL);
+
+         if (c == -1)
+            break;
+
+         switch (c)
+         {
+            case 'd':
+               {
+                  char *sep;
+                  unsigned new_port;
+                  unsigned id = 0;
+                  int port    = (int)strtol(optarg, &sep, 0);
+                  if (sep && *sep == ':')
+                     id = (unsigned)strtoul(sep + 1, NULL, 0);
+
+                  if (port < 1 || port > MAX_USERS)
+                  {
+                     RARCH_ERR("%s\n", msg_hash_to_str(MSG_VALUE_CONNECT_DEVICE_FROM_A_VALID_PORT));
+                     retroarch_print_help(argv[0]);
+                     retroarch_fail(1, "retroarch_parse_input()");
+                  }
+                  new_port = port - 1;
+                  input_config_set_device(new_port, id);
+                  retroarch_override_setting_set(
+                        RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE, &new_port);
+               }
+               break;
+
+            case 'A':
+               {
+                  unsigned new_port;
+                  int port = (int)strtol(optarg, NULL, 0);
+
+                  if (port < 1 || port > MAX_USERS)
+                  {
+                     RARCH_ERR("Connect dualanalog to a valid port.\n");
+                     retroarch_print_help(argv[0]);
+                     retroarch_fail(1, "retroarch_parse_input()");
+                  }
+                  new_port = port - 1;
+
+                  input_config_set_device(new_port, RETRO_DEVICE_ANALOG);
+                  retroarch_override_setting_set(
+                        RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE, &new_port);
+               }
+               break;
+
+            case 'f':
+               video_driver_modify_disp_flags(VIDEO_FLAG_FORCE_FULLSCREEN, 0);
+               break;
+
+            case 'N':
+               {
+                  unsigned new_port;
+                  int port = (int)strtol(optarg, NULL, 0);
+
+                  if (port < 1 || port > MAX_USERS)
+                  {
+                     RARCH_ERR("%s\n",
+                           msg_hash_to_str(MSG_DISCONNECT_DEVICE_FROM_A_VALID_PORT));
+                     retroarch_print_help(argv[0]);
+                     retroarch_fail(1, "retroarch_parse_input()");
+                  }
+                  new_port = port - 1;
+                  input_config_set_device(new_port, RETRO_DEVICE_NONE);
+                  retroarch_override_setting_set(
+                        RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE, &new_port);
+               }
+               break;
+
+            case 'r':
+               strlcpy(rec_st->path, optarg, sizeof(rec_st->path));
+               rec_st->enable = true;
+               break;
+
+            case RA_OPT_SET_SHADER:
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+               /* Disable auto-shaders */
+               if (!optarg || !*optarg)
+               {
+                  video_driver_modify_disp_flags(VIDEO_FLAG_CLI_SHADER_DISABLE, 0);
+                  break;
+               }
+
+               {
+                  video_driver_state_t *video_st  = video_state_get_ptr();
+                  /* Rebase on shader directory */
+                  if (path_is_absolute(optarg))
+                     strlcpy(video_st->cli_shader_path, optarg,
+                           sizeof(video_st->cli_shader_path));
+                  else
+                     fill_pathname_join_special(video_st->cli_shader_path,
+                           settings->paths.directory_video_shader,
+                           optarg, sizeof(video_st->cli_shader_path));
+               }
+#endif
+               break;
+
+#ifdef HAVE_DYNAMIC
+            case 'L':
+               retroarch_parse_input_libretro_path(p_rarch, optarg, strlen(optarg));
+               break;
+#endif
+            case 'P':
+#ifdef HAVE_BSV_MOVIE
+               {
+                  input_driver_state_t *input_st = input_state_get_ptr();
+                  strlcpy(input_st->bsv_movie_state.movie_start_path, optarg,
+                        sizeof(input_st->bsv_movie_state.movie_start_path));
+                  input_st->bsv_movie_state.flags |=
+                      BSV_FLAG_MOVIE_START_PLAYBACK;
+                  input_st->bsv_movie_state.flags &=
+                     ~BSV_FLAG_MOVIE_START_RECORDING;
+               }
+#endif
+               break;
+            case 'R':
+#ifdef HAVE_BSV_MOVIE
+               {
+                  input_driver_state_t *input_st = input_state_get_ptr();
+                  strlcpy(input_st->bsv_movie_state.movie_start_path, optarg,
+                        sizeof(input_st->bsv_movie_state.movie_start_path));
+                  input_st->bsv_movie_state.flags &=
+                     ~BSV_FLAG_MOVIE_START_PLAYBACK;
+                  input_st->bsv_movie_state.flags |=
+                     BSV_FLAG_MOVIE_START_RECORDING;
+               }
+#endif
+               break;
+
+            case 'M':
+               if (memcmp(optarg, "noload-nosave", 13) == 0)
+                  runloop_st->flags |= RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED
+                     | RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED;
+               else if (memcmp(optarg, "noload-save", 11) == 0)
+                  runloop_st->flags |= RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED;
+               else if (memcmp(optarg, "load-nosave", 11) == 0)
+                  runloop_st->flags |= RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED;
+               else if (string_is_not_equal(optarg, "load-save"))
+               {
+                  RARCH_ERR("Invalid argument in --sram-mode.\n");
+                  retroarch_print_help(argv[0]);
+                  retroarch_fail(1, "retroarch_parse_input()");
+               }
+               break;
+
+#ifdef HAVE_NETWORKING
+            case 'H':
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_NETPLAY_MODE, NULL);
+               netplay_driver_ctl(RARCH_NETPLAY_CTL_ENABLE_SERVER, NULL);
+               break;
+
+            case 'C':
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_NETPLAY_MODE, NULL);
+               netplay_driver_ctl(RARCH_NETPLAY_CTL_ENABLE_CLIENT, NULL);
+               p_rarch->connect_host = strdup(optarg);
+               break;
+
+            case 'T':
+               p_rarch->connect_mitm_id = strdup(optarg);
+               break;
+
+            case RA_OPT_CHECK_FRAMES:
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_NETPLAY_CHECK_FRAMES, NULL);
+
+               configuration_set_int(settings,
+                     settings->ints.netplay_check_frames,
+                     (int)strtoul(optarg, NULL, 0));
+               break;
+
+            case RA_OPT_PORT:
+               retroarch_override_setting_set(
+                     RARCH_OVERRIDE_SETTING_NETPLAY_IP_PORT, NULL);
+               configuration_set_uint(settings,
+                     settings->uints.netplay_port,
+                     (int)strtoul(optarg, NULL, 0));
+               break;
+
+#ifdef HAVE_NETWORK_CMD
+            case RA_OPT_COMMAND:
+#ifdef HAVE_COMMAND
+               if (command_network_send((const char*)optarg))
+                  exit(0);
+               else
+                  retroarch_fail(1, "network_cmd_send()");
+#endif
+               break;
+#endif
+
+#endif
+
+            case RA_OPT_BPS:
+#ifdef HAVE_PATCH
+               strlcpy(runloop_st->name.bps, optarg,
+                     sizeof(runloop_st->name.bps));
+               p_rarch->flags |= RARCH_FLAGS_BPS_PREF;
+               retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_BPS_PREF, NULL);
+#endif
+               break;
+
+            case 'U':
+#ifdef HAVE_PATCH
+               strlcpy(runloop_st->name.ups, optarg,
+                     sizeof(runloop_st->name.ups));
+               p_rarch->flags |= RARCH_FLAGS_UPS_PREF;
+               retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_UPS_PREF, NULL);
+#endif
+               break;
+
+            case RA_OPT_IPS:
+#ifdef HAVE_PATCH
+               strlcpy(runloop_st->name.ips, optarg,
+                     sizeof(runloop_st->name.ips));
+               p_rarch->flags |= RARCH_FLAGS_IPS_PREF;
+               retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_IPS_PREF, NULL);
+#endif
+               break;
+             case RA_OPT_XDELTA:
+#if defined(HAVE_PATCH) && defined(HAVE_XDELTA)
+                 strlcpy(runloop_st->name.xdelta, optarg,
+                     sizeof(runloop_st->name.xdelta));
+               p_rarch->flags |= RARCH_FLAGS_XDELTA_PREF;
+               retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_XDELTA_PREF, NULL);
+#endif
+                 break;
+            case RA_OPT_NO_PATCH:
+#ifdef HAVE_PATCH
+               runloop_st->flags |= RUNLOOP_FLAG_PATCH_BLOCKED;
+#endif
+               break;
+
+            case 'D':
+               frontend_driver_detach_console();
+               break;
+
+            case RA_OPT_MENU:
+               explicit_menu = true;
+               break;
+
+            case RA_OPT_NICK:
+               p_rarch->flags |= RARCH_FLAGS_HAS_SET_USERNAME;
+
+               configuration_set_string(settings,
+                     settings->paths.username, optarg);
+               break;
+
+            case RA_OPT_SIZE:
+               {
+                  char *sep;
+                  unsigned long w = (unsigned long)strtoul(optarg, &sep, 0);
+                  if (sep == optarg || *sep != 'x')
+                  {
+                     RARCH_ERR("Wrong format for --size.\n");
+                     retroarch_print_help(argv[0]);
+                     retroarch_fail(1, "retroarch_parse_input()");
+                  }
+                  {
+                     char *end;
+                     unsigned long h = (unsigned long)strtoul(sep + 1, &end, 0);
+                     if (end == sep + 1 || *end != '\0')
+                     {
+                        RARCH_ERR("Wrong format for --size.\n");
+                        retroarch_print_help(argv[0]);
+                        retroarch_fail(1, "retroarch_parse_input()");
+                     }
+                     rec_st->out_dims = VIDEO_SCALE_PACK((unsigned)w,
+                           (unsigned)h);
+                  }
+               }
+               break;
+
+            case RA_OPT_RECORDCONFIG:
+               strlcpy(rec_st->config, optarg, sizeof(rec_st->config));
+               break;
+
+            case RA_OPT_MAX_FRAMES:
+               runloop_st->max_frames  = (unsigned)strtoul(optarg, NULL, 10);
+               break;
+
+            case RA_OPT_MAX_FRAMES_SCREENSHOT:
+#ifdef HAVE_SCREENSHOTS
+               runloop_st->flags |= RUNLOOP_FLAG_MAX_FRAMES_SCREENSHOT;
+#endif
+               break;
+
+            case RA_OPT_MAX_FRAMES_SCREENSHOT_PATH:
+#ifdef HAVE_SCREENSHOTS
+               strlcpy(runloop_st->max_frames_screenshot_path,
+                     optarg,
+                     sizeof(runloop_st->max_frames_screenshot_path));
+#endif
+               break;
+
+            case RA_OPT_SUBSYSTEM:
+               strlcpy(runloop_st->subsystem_path, optarg,
+                     sizeof(runloop_st->subsystem_path));
+               break;
+
+            case RA_OPT_EOF_EXIT:
+#ifdef HAVE_BSV_MOVIE
+               {
+                  input_driver_state_t *input_st   = input_state_get_ptr();
+                  input_st->bsv_movie_state.flags |= BSV_FLAG_MOVIE_EOF_EXIT;
+               }
+#endif
+               break;
+
+            case 'h':
+            case 'V':
+            case RA_OPT_VERSION:
+            case RA_OPT_FEATURES:
+#ifdef HAVE_CONFIGFILE
+            case 'c':
+            case RA_OPT_APPENDCONFIG:
+#endif
+            case 's':
+            case 'S':
+            case 'v':
+            case RA_OPT_LOG_FILE:
+#ifdef HAVE_MCP
+            case RA_OPT_MCP_STDIO:
+#endif
+               break; /* Handled in the first pass */
+
+            case '?':
+               retroarch_print_help(argv[0]);
+               retroarch_fail(1, "retroarch_parse_input()");
+            case RA_OPT_ACCESSIBILITY:
+#ifdef HAVE_ACCESSIBILITY
+               access_st->enabled = true;
+#endif
+               break;
+            case RA_OPT_LOAD_MENU_ON_ERROR:
+               rarch_st.flags |= RARCH_FLAGS_CLI_LOAD_MENU_ON_ERR;
+               break;
+            case 'e':
+               {
+                  char *endptr;
+                  long entry_state_slot = strtol(optarg, &endptr, 0);
+
+                  if (endptr == optarg || *endptr != '\0' ||
+                      entry_state_slot < 0 || entry_state_slot > 999)
+                  {
+                     RARCH_WARN("[State] --entryslot argument \"%s\" is not a valid "
+                        "entry state slot index. Ignoring.\n", optarg);
+                  }
+                  else
+                     runloop_st->entry_state_slot = entry_state_slot;
+               }
+               break;
+            case RA_OPT_DATABASE_SCAN:
+#ifdef HAVE_LIBRETRODB
+               {
+                  settings_t *settings           = config_get_ptr();
+                  int reinit_flags               = DRIVERS_CMD_ALL &
+                        ~(DRIVER_VIDEO_MASK | DRIVER_AUDIO_MASK | DRIVER_MICROPHONE_MASK | DRIVER_INPUT_MASK | DRIVER_MIDI_MASK);
+
+                  drivers_init(settings, reinit_flags, (enum driver_lifetime_flags)0, false);
+                  retroarch_init_task_queue();
+#ifdef HAVE_THREADS
+                  /* Threaded for this run whatever the setting: only
+                   * there does the scan get its readers. */
+                  if (!explicit_menu && !task_queue_is_threaded())
+                  {
+                     task_queue_set_threaded();
+                     task_queue_check();
+                  }
+#endif
+
+#ifdef HAVE_MENU
+                  if (explicit_menu)
+                     cb_task_dbscan = handle_dbscan_finished;
+#endif
+
+                  task_push_dbscan(optarg, cb_task_dbscan);
+
+                  if (!explicit_menu)
+                  {
+                     /* Command-line scan with no menu: the scan is
+                      * the whole run, so run the queue dry and exit.
+                      * Nothing is drawn meanwhile. */
+                     task_queue_wait(NULL, NULL);
+                     driver_uninit(DRIVERS_CMD_ALL, (enum driver_lifetime_flags)0);
+                     exit(0);
+                  }
+               }
+#endif
+               break;
+            case RA_OPT_CLOUDSYNC:
+#ifdef HAVE_CLOUDSYNC
+               {
+                  int result                     = -1;
+                  settings_t *settings           = config_get_ptr();
+                  int reinit_flags               = DRIVERS_CMD_ALL &
+                        ~(DRIVER_VIDEO_MASK | DRIVER_AUDIO_MASK | DRIVER_MICROPHONE_MASK | DRIVER_INPUT_MASK | DRIVER_MIDI_MASK);
+
+                  if (!settings->bools.cloud_sync_enable)
+                  {
+                     RARCH_WARN("[CloudSync] Cloud Sync is disabled, nothing to sync.\n");
+                     exit(0);
+                  }
+
+                  /* The sync is the whole run: what retroarch_main_init()
+                   * would set up for it, then the queue until it reports. */
+                  drivers_init(settings, reinit_flags, (enum driver_lifetime_flags)0, false);
+                  retroarch_init_task_queue();
+                  cloud_sync_find_driver(settings->arrays.cloud_sync_driver,
+                        "cloud sync driver", verbosity_is_enabled());
+
+                  if ((result = retroarch_cloud_sync_run()) < 0)
+                     result = EXIT_FAILURE;
+
+                  /* A blocking driver's worker, before what it calls
+                   * into is torn down. */
+                  cloud_sync_deinit(1000);
+                  driver_uninit(DRIVERS_CMD_ALL, (enum driver_lifetime_flags)0);
+                  task_queue_deinit();
+#ifdef HAVE_NETWORKING
+                  net_http_deinit();
+#endif
+                  exit(result);
+               }
+#endif
+               break;
+            default:
+               RARCH_ERR("%s\n", msg_hash_to_str(MSG_ERROR_PARSING_ARGUMENTS));
+               retroarch_fail(1, "retroarch_parse_input()");
+         }
+      }
+   }
+
+#ifdef HAVE_GIT_VERSION
+   RARCH_LOG("RetroArch %s (Git %s)\n",
+         PACKAGE_VERSION, retroarch_git_version);
+#endif
+
+   if (explicit_menu)
+   {
+      if (optind < argc)
+      {
+         RARCH_ERR("--menu was used, but content file was passed as well.\n");
+         retroarch_fail(1, "retroarch_parse_input()");
+      }
+#ifdef HAVE_DYNAMIC
+      else
+      {
+         /* Allow stray -L arguments to go through to workaround cases
+          * where it's used as "config file".
+          *
+          * This seems to still be the case for Android, which
+          * should be properly fixed. */
+         runloop_set_current_core_type(CORE_TYPE_DUMMY, false);
+      }
+#endif
+   }
+
+   if (optind < argc)
+   {
+      bool subsystem_path_is_empty = path_is_empty(RARCH_PATH_SUBSYSTEM);
+
+      /* We requested explicit ROM, so use PLAIN core type. */
+      runloop_set_current_core_type(CORE_TYPE_PLAIN, false);
+
+      if (subsystem_path_is_empty)
+      {
+         runloop_path_set_basename((const char*)argv[optind]);
+         runloop_path_set_names();
+         runloop_path_set_redirect(settings, p_rarch->dir_savefile,
+               p_rarch->dir_savestate);
+      }
+      else
+         runloop_path_set_special(argv + optind, argc - optind);
+
+      /* Register that content has been set via the
+       * command line interface */
+      cli_content_set = true;
+   }
+   else if (runloop_st->entry_state_slot > -1)
+   {
+      runloop_st->entry_state_slot = -1;
+      RARCH_WARN("[State] Trying to load entry state without content. Ignoring.\n");
+   }
+   #ifdef HAVE_BSV_MOVIE
+   if (runloop_st->entry_state_slot > -1)
+   {
+     input_driver_state_t *input_st = input_state_get_ptr();
+     if (input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_START_PLAYBACK)
+     {
+        runloop_st->entry_state_slot = -1;
+        RARCH_WARN("[State] Trying to load entry state while replay playback is active. Ignoring entry state.\n");
+     }
+   }
+   #endif
+
+
+   /* Check whether a core has been set via the
+    * command line interface */
+   cli_core_set = (runloop_st->current_core_type != CORE_TYPE_DUMMY);
+
+   /* Update global 'content launched from command
+    * line' status flag */
+   if (cli_active && (cli_core_set || cli_content_set))
+      rarch_st.flags |=  (RARCH_FLAGS_LAUNCHED_FROM_CLI);
+   else
+      rarch_st.flags &= ~(RARCH_FLAGS_LAUNCHED_FROM_CLI);
+
+   /* Copy SRM/state dirs used, so they can be reused on reentrancy. */
+   if (retroarch_override_setting_is_set(RARCH_OVERRIDE_SETTING_SAVE_PATH, NULL) &&
+         path_is_directory(runloop_st->name.savefile))
+      dir_set(RARCH_DIR_SAVEFILE, runloop_st->name.savefile);
+
+   if (retroarch_override_setting_is_set(RARCH_OVERRIDE_SETTING_STATE_PATH, NULL) &&
+         path_is_directory(runloop_st->name.savestate))
+      dir_set(RARCH_DIR_SAVESTATE, runloop_st->name.savestate);
+
+   return verbosity_enabled;
+}
+
+/**
+ * retroarch_validate_cpu_features:
+ *
+ * Validates CPU features for given processor architecture.
+ * Make sure we haven't compiled for something we cannot run.
+ * Ideally, code would get swapped out depending on CPU support,
+ * but this will do for now.
+ **/
+static void retroarch_validate_cpu_features(void)
+{
+   uint64_t cpu = cpu_features_get();
+   (void)cpu;
+
+#ifdef __MMX__
+   if (!(cpu & RETRO_SIMD_MMX))
+      FAIL_CPU("MMX");
+#endif
+#ifdef __SSE__
+   if (!(cpu & RETRO_SIMD_SSE))
+      FAIL_CPU("SSE");
+#endif
+#ifdef __SSE2__
+   if (!(cpu & RETRO_SIMD_SSE2))
+      FAIL_CPU("SSE2");
+#endif
+#ifdef __AVX__
+   if (!(cpu & RETRO_SIMD_AVX))
+      FAIL_CPU("AVX");
+#endif
+}
+
+/**
+ * retroarch_main_init:
+ * @argc                 : Count of (commandline) arguments.
+ * @argv                 : (Commandline) arguments.
+ *
+ * Initializes the program.
+ *
+ * @return true on success, otherwise false if there was an error.
+ **/
+/* Runtime savestate probe for core_info. A running core that reports a
+ * nonzero serializable size can save/load state even if its info file
+ * declares otherwise; core_info.c consults this via a registered seam so
+ * it need not depend on the runloop/retroarch backend directly. */
+static bool retroarch_core_info_savestate_probe(void)
+{
+   return (runloop_get_flags() & RUNLOOP_FLAG_CORE_RUNNING)
+         && core_serialize_size() > 0;
+}
+
+/* What a failed phase leaves behind: no core, no session, and the
+ * jmp_buf retroarch_fail() would land in dead. */
+static bool retroarch_main_init_fail(void)
+{
+   command_event(CMD_EVENT_CORE_DEINIT, NULL);
+   runloop_is_inited_clear();
+   rarch_st.flags &= ~RARCH_FLAGS_INIT_IN_PROGRESS;
+   return false;
+}
+
+/* Picks the driver of every kind from the configuration; the video,
+ * input and menu ones are required.  Reports through retroarch_fail(),
+ * so it runs under a live error_sjlj_context. */
+static void retroarch_find_drivers(settings_t *settings,
+      bool verbosity_enabled)
+{
+#ifdef HAVE_MENU
+   struct menu_state *menu_st    = menu_state_get_ptr();
+#endif
+   if (!(audio_driver_find_driver(settings->arrays.audio_driver,
+         "audio driver", verbosity_enabled)))
+      retroarch_fail(1, "audio_driver_find()");
+   if (!video_driver_find_driver(settings,
+         "video driver", verbosity_enabled))
+      retroarch_fail(1, "video_driver_find_driver()");
+   if (!input_driver_find_driver(settings,
+         "input driver", verbosity_enabled))
+      retroarch_fail(1, "input_driver_find_driver()");
+
+   if (!camera_driver_find_driver("camera driver", verbosity_enabled))
+      retroarch_fail(1, "find_camera_driver()");
+
+#ifdef HAVE_BLUETOOTH
+   bluetooth_driver_ctl(RARCH_BLUETOOTH_CTL_FIND_DRIVER, NULL);
+#endif
+#ifdef HAVE_WIFI
+   wifi_driver_ctl(RARCH_WIFI_CTL_FIND_DRIVER, NULL);
+#endif
+#ifdef HAVE_CLOUDSYNC
+   cloud_sync_find_driver(settings->arrays.cloud_sync_driver,
+         "cloud sync driver", verbosity_enabled);
+#endif
+   location_driver_find_driver(settings->arrays.location_driver,
+         &location_driver_st,
+         "location driver", verbosity_enabled);
+#ifdef HAVE_MENU
+   {
+      const menu_ctx_driver_t *menu_ctx_new = menu_driver_find_driver(
+            settings, "menu driver", verbosity_enabled);
+      if (!menu_ctx_new)
+         retroarch_fail(1, "menu_driver_find_driver()");
+
+      /* If a menu driver instance is already allocated and the
+       * selected menu driver has changed since that instance was
+       * created - e.g. a configuration file specifying a different
+       * 'menu_driver' has just been loaded at runtime - the stale
+       * instance must be torn down here, while menu_st->driver_ctx
+       * still references the *old* driver (so that the correct
+       * free()/context_destroy() handlers are invoked on the old
+       * handle).
+       *
+       * Otherwise menu_driver_init() would skip (re)initialisation
+       * - because driver_data is non-NULL - and invoke the new
+       * driver's context_reset() on the old driver's handle,
+       * dereferencing it as the wrong type (crash). */
+      if (     menu_st->driver_data
+            &&  menu_st->driver_ctx
+            && (menu_st->driver_ctx != menu_ctx_new))
+      {
+         uint16_t menu_data_own = (menu_st->flags & MENU_ST_FLAG_DATA_OWN);
+#ifdef HAVE_THREADS
+         /* Same barrier as driver_uninit(): RARCH_MENU_CTL_DEINIT runs
+          * the old driver's context_destroy(), which frees the textures
+          * and fonts an in-flight threaded frame is still drawing with.
+          *
+          * No-op when threaded video is not active. */
+         video_thread_wait_idle();
+#endif
+         menu_st->flags        &= ~MENU_ST_FLAG_DATA_OWN;
+         menu_driver_ctl(RARCH_MENU_CTL_DEINIT, NULL);
+         menu_st->flags        |= menu_data_own;
+      }
+
+      menu_st->driver_ctx = menu_ctx_new;
+   }
+#endif
+}
+
+bool retroarch_main_init_core(int argc, char *argv[],
+      bool find_drivers, bool *verbosity)
+{
+#if defined(DEBUG) && defined(HAVE_DRMINGW)
+   char log_file_name[128];
+#endif
+   bool verbosity_enabled        = false;
+   bool           init_failed    = false;
+   struct rarch_state *p_rarch   = &rarch_st;
+   runloop_state_t *runloop_st   = runloop_state_get_ptr();
+   settings_t *settings          = config_get_ptr();
+#ifdef HAVE_ACCESSIBILITY
+   access_state_t *access_st     = access_state_get_ptr();
+   bool accessibility_enable     = false;
+   unsigned accessibility_narrator_speech_speed = 0;
+#endif
+#ifdef HAVE_MENU
+   struct menu_state *menu_st    = menu_state_get_ptr();
+#endif
+
+   core_info_set_savestate_probe(retroarch_core_info_savestate_probe);
+
+#ifdef HAVE_MENU
+   menu_st->osk_idx              = OSK_LOWERCASE_LATIN;
+#endif
+   /* The active bits answer the core's GET_AV_ENABLE during its init.
+    * Staged, the previous session's drivers are still up and present
+    * between stages, so the bits keep saying what those drivers can
+    * do (an audio driver that failed to start has none); the driver
+    * phase raises them for the new session. */
+   if (find_drivers)
+   {
+      video_state_get_ptr()->main_flags |=  VIDEO_FLAG_ACTIVE;
+      AUDIO_FLAGS_SET(audio_state_get_ptr(), AUDIO_FLAG_ACTIVE);
+   }
+
+   if (setjmp(rarch_st.error_sjlj_context) > 0)
+   {
+      RARCH_ERR("%s: \"%s\"\n",
+            msg_hash_to_str(MSG_FATAL_ERROR_RECEIVED_IN),
+            rarch_st.error_string);
+      return retroarch_main_init_fail();
+   }
+
+   /* Mark error_sjlj_context as live. retroarch_fail checks this
+    * before longjmp'ing; reinit-time driver_init failures that
+    * reach retroarch_fail outside this function will log and
+    * return rather than landing in a stale jmp_buf. */
+   rarch_st.flags |= RARCH_FLAGS_INIT_IN_PROGRESS;
+
+   rarch_st.flags |= RARCH_FLAGS_ERR_ON_INIT;
+
+   /* Have to initialise non-file logging once at the start... */
+   retro_main_log_file_init(NULL, false);
+
+   verbosity_enabled = retroarch_parse_input_and_config(p_rarch,
+         argc, argv);
+
+#if defined(HAVE_SSL) && defined(HAVE_NETWORKING)
+   /* Apply the persisted TLS certificate-verification policy to the active
+    * SSL backend before any HTTPS task (cloud sync, cheevos, updater) runs. */
+   ssl_socket_set_verify_mode(settings->uints.tls_verify_mode);
+#endif
+
+#ifdef __APPLE__
+   /* This doesn't have to be apple specific but it's currently the only
+    * platform that doesn't call dir_check_defaults(). This does exactly the
+    * same thing as dir_check_defaults() except that it makes the directories
+    * pointed at by the config file rather than the defaults, which is why it
+    * comes right after parsing the config. osx users seem to be more likely to
+    * want to do change the default directories.
+    */
+   dir_check_config();
+#endif
+
+#ifdef HAVE_ACCESSIBILITY
+   accessibility_enable                = settings->bools.accessibility_enable;
+   accessibility_narrator_speech_speed = settings->uints.accessibility_narrator_speech_speed;
+   /* State that the narrator is on, and also include the first menu
+      item we're on at startup. */
+   if (is_accessibility_enabled(
+            accessibility_enable,
+            access_st->enabled))
+      accessibility_speak_priority(
+            accessibility_enable,
+            accessibility_narrator_speech_speed,
+            (char*)msg_hash_to_str(MSG_ACCESSIBILITY_STARTUP),
+            10);
+#endif
+
+   if (verbosity_enabled)
+   {
+      {
+         char str_output[384];
+         const char *cpu_model  = frontend_driver_get_cpu_model_name();
+         size_t _len = strlcpy_lit(str_output,
+               "=== Build =================================================\n",
+               sizeof(str_output));
+
+         if (cpu_model && *cpu_model)
+         {
+            /* TODO/FIXME - localize */
+            _len += strlcpy(str_output + _len,
+                  FILE_PATH_LOG_INFO " CPU Model Name: ",
+                  sizeof(str_output)   - _len);
+            _len += strlcpy(str_output + _len,
+                  cpu_model,
+                  sizeof(str_output) - _len);
+            str_output[  _len] = '\n';
+            str_output[++_len] = '\0';
+         }
+
+         RARCH_LOG_OUTPUT("%s", str_output);
+      }
+
+      {
+         char str_output[256];
+         /* Wide enough for every name the mask can name at once, so
+          * the log does not stop mid-list on a CPU that reports a lot
+          * of them. */
+         char str[192];
+         int len;
+         retroarch_get_capabilities(RARCH_CAPABILITIES_CPU, str, sizeof(str));
+
+         len = snprintf(str_output, sizeof(str_output),
+            "%s: %s\n"
+            FILE_PATH_LOG_INFO " Version: " PACKAGE_VERSION "\n",
+            msg_hash_to_str(MSG_CAPABILITIES),
+            str);
+#ifdef HAVE_GIT_VERSION
+         len += snprintf(str_output + len, sizeof(str_output) - len,
+            FILE_PATH_LOG_INFO " Git: %s\n",
+            retroarch_git_version);
+#endif
+         snprintf(str_output + len, sizeof(str_output) - len,
+               FILE_PATH_LOG_INFO " Built: " __DATE__ "\n");
+         RARCH_LOG_OUTPUT("%s", str_output);
+      }
+
+#if defined(ANDROID)
+      {
+         char str_output[128];
+         char manufacturer_model[PROP_VALUE_MAX * 2];
+         int32_t major = 0;
+         int32_t minor = 0;
+         int32_t rel   = 0;
+
+         const char *abi =
+#if defined(__aarch64__)
+            "arm64-v8a";
+#elif defined(__arm__)
+            "armeabi-v7a";
+#elif defined(__x86_64__)
+            "x86_64";
+#elif defined(__i386__)
+            "x86";
+#else
+            "unknown";
+#endif
+
+         const char *build_type =
+            !g_android ? "Unknown" :
+            g_android->is_play_store_build ? "Play Store" :
+            "Sideload";
+
+         frontend_android_get_version(&major, &minor, &rel);
+         frontend_android_get_manufacturer_model(
+            manufacturer_model, sizeof(manufacturer_model));
+
+         snprintf(str_output, sizeof(str_output),
+            FILE_PATH_LOG_INFO " Running on: Android v%d.%d.%d (%s, %s)\n"
+            FILE_PATH_LOG_INFO " Device: %s\n",
+            major,
+            minor,
+            rel,
+            build_type,
+            abi,
+            manufacturer_model);
+         RARCH_LOG_OUTPUT("%s", str_output);
+      }
+#elif defined(WEBOS)
+      {
+         char str_output[256];
+         char osbuf[128];
+         int major = 0, minor = 0;
+         frontend_state_t *frontend_st = frontend_state_get_ptr();
+
+         if (frontend_st)
+         {
+            frontend_ctx_driver_t *frontend = frontend_st->current_frontend_ctx;
+            if (frontend && frontend->get_os)
+            {
+               frontend->get_os(osbuf, sizeof(osbuf), &major, &minor);
+
+#ifdef __aarch64__
+               const char *arch = " (64-bit)";
+#else
+               const char *arch = " (32-bit)";
+#endif
+               snprintf(str_output, sizeof(str_output),
+                  "Running on: %s%s\n",
+                  osbuf, arch);
+               RARCH_LOG_OUTPUT("%s", str_output);
+            }
+         }
+      }
+#endif
+#ifdef HAVE_OPENXR
+      {
+         char str_output[128];
+         strlcpy(str_output, "OpenXR support: enabled\n",
+               sizeof(str_output));
+         RARCH_LOG_OUTPUT("%s", str_output);
+      }
+#endif
+      {
+         char str_output[64];
+         snprintf(str_output, sizeof(str_output),
+            "===========================================================\n");
+         RARCH_LOG_OUTPUT("%s", str_output);
+      }
+   }
+
+#if defined(DEBUG) && defined(HAVE_DRMINGW)
+   RARCH_LOG_OUTPUT("Initializing Dr.MingW Exception handler\n");
+   fill_str_dated_filename(log_file_name, "crash",
+         "log", sizeof(log_file_name));
+   ExcHndlInit();
+   ExcHndlSetLogFileNameA(log_file_name);
+#endif
+
+   retroarch_validate_cpu_features();
+   /* Startup builds the queue; a load onto a running session keeps
+    * it - and every task in flight - and applies the configuration. */
+   if (find_drivers)
+      retroarch_init_task_queue();
+   else
+      retroarch_task_queue_configure();
+
+   {
+      const char    *fullpath  = p_rarch->path_content;
+
+#ifdef HAVE_MENU
+      menu_driver_media_open(NULL);
+#endif
+      if (fullpath && *fullpath)
+      {
+         enum rarch_content_type cont_type = path_is_media_type(fullpath);
+#ifdef HAVE_IMAGEVIEWER
+         bool builtin_imageviewer          = settings->bools.multimedia_builtin_imageviewer_enable;
+#endif
+         bool builtin_mediaplayer          = settings->bools.multimedia_builtin_mediaplayer_enable;
+
+#ifdef HAVE_MENU
+         if (!(runloop_st->flags & RUNLOOP_FLAG_HAS_SET_CORE)
+               && !retroarch_override_setting_is_set(
+                  RARCH_OVERRIDE_SETTING_LIBRETRO, NULL)
+               && menu_driver_media_open(fullpath))
+         {
+            path_clear(RARCH_PATH_CONTENT);
+            path_clear(RARCH_PATH_BASENAME);
+            runloop_set_current_core_type(CORE_TYPE_DUMMY, false);
+         }
+         else
+#endif
+         switch (cont_type)
+         {
+            case RARCH_CONTENT_MOVIE:
+            case RARCH_CONTENT_MUSIC:
+               if (builtin_mediaplayer)
+               {
+                  /* TODO/FIXME - it needs to become possible to
+                   * switch between FFmpeg and MPV at runtime */
+#if defined(HAVE_MPV)
+                  retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO, NULL);
+                  runloop_set_current_core_type(CORE_TYPE_MPV, false);
+#elif defined(HAVE_FFMPEG)
+                  retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO, NULL);
+                  runloop_set_current_core_type(CORE_TYPE_FFMPEG, false);
+#elif defined(HAVE_WEBMPLAYER)
+                  if (cont_type == RARCH_CONTENT_MOVIE)
+                  {
+                     retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO, NULL);
+                     runloop_set_current_core_type(CORE_TYPE_WEBM, false);
+                  }
+#endif
+               }
+               break;
+#ifdef HAVE_IMAGEVIEWER
+            case RARCH_CONTENT_IMAGE:
+               if (builtin_imageviewer)
+               {
+                  retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_LIBRETRO, NULL);
+                  runloop_set_current_core_type(CORE_TYPE_IMAGEVIEWER, false);
+               }
+               break;
+#endif
+            default:
+               break;
+         }
+      }
+   }
+
+   /* Pre-initialize all drivers: find a driver of every kind.  The
+    * staged load has the previous session's drivers up at this point
+    * and finds after freeing them, in retroarch_main_init_drivers(). */
+   if (find_drivers)
+      retroarch_find_drivers(settings, verbosity_enabled);
+
+#ifdef HAVE_CLOUDSYNC
+   /* Content from the command line loads its save RAM below, before
+    * rarch_main() would push the startup sync. The sync runs first, so
+    * the core reads the save the server has. */
+   if (      find_drivers
+         && (rarch_st.flags & RARCH_FLAGS_LAUNCHED_FROM_CLI)
+         && !string_is_empty(p_rarch->path_content)
+         && settings->bools.cloud_sync_enable
+         && settings->uints.cloud_sync_sync_mode == CLOUD_SYNC_MODE_AUTOMATIC)
+   {
+      retroarch_cloud_sync_run();
+      rarch_st.flags |= RARCH_FLAGS_CLOUD_SYNC_AT_INIT;
+   }
+#endif
+
+   /* Enforce stored brightness if needed */
+   if (frontend_driver_can_set_screen_brightness())
+      frontend_driver_set_screen_brightness(settings->uints.screen_brightness);
+
+   /* Attempt to initialize core */
+   if (runloop_st->flags & RUNLOOP_FLAG_HAS_SET_CORE)
+   {
+      runloop_st->flags &= ~RUNLOOP_FLAG_HAS_SET_CORE;
+      if (!command_event(CMD_EVENT_CORE_INIT,
+               &runloop_st->explicit_current_core_type))
+         init_failed = true;
+   }
+   else if (!command_event(CMD_EVENT_CORE_INIT,
+            &runloop_st->current_core_type))
+      init_failed = true;
+
+   /* Handle core initialization failure */
+   if (init_failed)
+   {
+#ifdef HAVE_DYNAMIC
+      /* Check if menu was active prior to core initialization */
+      if (   (!(rarch_st.flags & RARCH_FLAGS_LAUNCHED_FROM_CLI))
+          ||   (rarch_st.flags & RARCH_FLAGS_CLI_LOAD_MENU_ON_ERR)
+#ifdef HAVE_MENU
+          ||  (menu_st->flags & MENU_ST_FLAG_ALIVE)
+#endif
+         )
+#endif
+      {
+         /* Before initialising the dummy core, ensure
+          * that we:
+          * - Unload any active input remaps
+          * - Disable any active config overrides */
+         if (     (runloop_st->flags & RUNLOOP_FLAG_REMAPS_CORE_ACTIVE)
+               || (runloop_st->flags & RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE)
+               || (runloop_st->flags & RUNLOOP_FLAG_REMAPS_GAME_ACTIVE)
+               || (runloop_st->name.remapfile && *runloop_st->name.remapfile)
+            )
+         {
+            input_remapping_deinit(false);
+            input_remapping_set_defaults(true);
+         }
+         else
+            input_remapping_restore_global_config(true, false);
+
+#ifdef HAVE_DYNAMIC
+         /* Ensure that currently loaded core is properly
+          * deinitialised */
+         if (runloop_st->current_core_type != CORE_TYPE_DUMMY)
+            command_event(CMD_EVENT_CORE_DEINIT, NULL);
+#endif
+
+#ifdef HAVE_CONFIGFILE
+         /* Reload the original config */
+         if (runloop_st->flags & RUNLOOP_FLAG_OVERRIDES_ACTIVE)
+            config_unload_override();
+#endif
+
+         /* Attempt initializing dummy core */
+         runloop_st->current_core_type = CORE_TYPE_DUMMY;
+         if (!command_event(CMD_EVENT_CORE_INIT, &runloop_st->current_core_type))
+            return retroarch_main_init_fail();
+      }
+#ifdef HAVE_DYNAMIC
+      else /* Fall back to regular error handling */
+         return retroarch_main_init_fail();
+#endif
+   }
+
+#ifdef HAVE_CHEATS
+   cheat_manager_state_free();
+   command_event_init_cheats(
+         settings->bools.apply_cheats_after_load,
+         settings->paths.path_cheat_database,
+#ifdef HAVE_BSV_MOVIE
+         input_state_get_ptr()->bsv_movie_state_handle
+#else
+         NULL
+#endif
+         );
+#endif
+   /* The jmp_buf dies with this frame; the next phase arms its own. */
+   rarch_st.flags &= ~RARCH_FLAGS_INIT_IN_PROGRESS;
+   *verbosity     = verbosity_enabled;
+   return true;
+}
+
+bool retroarch_main_init_drivers(bool staged,
+      bool verbosity_enabled)
+{
+   runloop_state_t *runloop_st   = runloop_state_get_ptr();
+   input_driver_state_t
+      *input_st                  = input_state_get_ptr();
+   settings_t *settings          = config_get_ptr();
+   recording_state_t *rec_st     = recording_state_get_ptr();
+
+   if (setjmp(rarch_st.error_sjlj_context) > 0)
+   {
+      RARCH_ERR("%s: \"%s\"\n",
+            msg_hash_to_str(MSG_FATAL_ERROR_RECEIVED_IN),
+            rarch_st.error_string);
+      return retroarch_main_init_fail();
+   }
+   rarch_st.flags |= RARCH_FLAGS_INIT_IN_PROGRESS;
+
+   if (staged)
+   {
+      /* The previous session's drivers go here, and the new core's
+       * hardware-render request goes around them: the request is for
+       * a context these drivers never built, so the teardown must
+       * not destroy it, and drivers_init builds it from the request
+       * once it is back. */
+      struct video_hw_request hw_request;
+      video_driver_hw_request_take(&hw_request);
+      /* drivers_init() is a few lines down: an input driver that can
+       * outlive the video driver is left running across the two */
+      driver_uninit(DRIVERS_CMD_ALL, DRIVER_LIFETIME_SESSION_SWITCH);
+      video_driver_hw_request_restore(&hw_request);
+
+      video_state_get_ptr()->main_flags |=  VIDEO_FLAG_ACTIVE;
+      AUDIO_FLAGS_SET(audio_state_get_ptr(), AUDIO_FLAG_ACTIVE);
+      retroarch_find_drivers(settings, verbosity_enabled);
+   }
+
+   drivers_init(settings, DRIVERS_CMD_ALL, (enum driver_lifetime_flags)0, verbosity_enabled);
+#ifdef HAVE_COMMAND
+   input_driver_refresh_command(input_st, settings);
+#endif
+#ifdef HAVE_NETWORKGAMEPAD
+   if (input_st->remote)
+      input_remote_free(input_st->remote,
+            settings->uints.input_max_users);
+   input_st->remote    = NULL;
+   if (settings->bools.network_remote_enable)
+      input_st->remote = input_driver_init_remote(
+            settings,
+            settings->uints.input_max_users);
+#endif
+   input_mapper_reset(&input_st->mapper);
+   command_event(CMD_EVENT_CONTROLLER_INIT, NULL);
+
+#ifdef HAVE_REWIND
+   /* Set up on the frame after the load, before the core runs: the
+    * buffer is one full serialize of the core */
+   runloop_st->rewind_st.flags |= STATE_MGR_REWIND_ST_FLAG_INIT_PENDING;
+#endif
+
+   if (*rec_st->path)
+      command_event(CMD_EVENT_RECORD_INIT, NULL);
+
+   command_event(CMD_EVENT_SET_PER_GAME_RESOLUTION, NULL);
+
+   rarch_st.flags                   &= ~RARCH_FLAGS_ERR_ON_INIT;
+   runloop_is_inited_set();
+
+#ifdef HAVE_DISCORD
+   {
+      discord_state_t *discord_st = discord_state_get_ptr();
+
+      if (command_event(CMD_EVENT_DISCORD_INIT, NULL))
+      {
+         discord_st->inited       = true;
+         runloop_st->frame_work  |= RUNLOOP_WORK_DISCORD | RUNLOOP_WORK_PRESENCE;
+      }
+   }
+#endif
+
+#ifdef HAVE_PRESENCE
+   {
+      presence_userdata_t userdata;
+      userdata.status = PRESENCE_MENU;
+      command_event(CMD_EVENT_PRESENCE_UPDATE, &userdata);
+   }
+#endif
+
+#if defined(HAVE_AUDIOMIXER)
+   audio_driver_load_system_sounds();
+#endif
+
+#ifdef HAVE_RUNAHEAD
+#ifdef HAVE_MENU
+   menu_update_runahead_mode();
+#endif
+#ifdef HAVE_NETWORKING
+   if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_ENABLED, NULL))
+#endif
+      preempt_init(runloop_st);
+#endif
+
+#ifdef HAVE_GAME_AI
+   game_ai_init();
+#endif
+
+#if !defined(HAVE_DYNAMIC)
+   /* The first time this process's drivers are up, the core salamander
+    * launched has started. */
+   {
+      static bool salamander_cleared = false;
+      if (!salamander_cleared)
+      {
+         config_clear_salamander_pending();
+         salamander_cleared = true;
+      }
+   }
+#endif
+
+   rarch_st.flags &= ~RARCH_FLAGS_INIT_IN_PROGRESS;
+   return true;
+}
+
+bool retroarch_main_init(int argc, char *argv[])
+{
+   bool verbosity_enabled = false;
+   return retroarch_main_init_core(argc, argv, true, &verbosity_enabled)
+       && retroarch_main_init_drivers(false, verbosity_enabled);
+}
+
+#ifdef DEBUG
+/* Reports a task handler that occupied the main thread for longer
+ * than its budget.  Rate-limited per handler: a task that stalls
+ * once usually stalls every invocation, and a warning per frame
+ * would bury the first (most useful) report. */
+static void runloop_task_slow_handler(retro_task_t *task,
+      retro_time_t usec)
+{
+   /* Held as the handler's own type: a function pointer is not
+    * convertible to void* in ISO C, and comparing the two is not
+    * valid either. */
+   static retro_task_handler_t last_handler;
+   static unsigned suppressed;
+
+   if (!task)
+      return;
+
+   /* A content load's stages run the core's own load, unload and
+    * the driver rebuild: work the core and the drivers do, not task
+    * or list work, and no slicing can shorten retro_load_game. */
+   if (task_content_is_load_stage(task))
+      return;
+
+   if (task->handler == last_handler)
+   {
+      suppressed++;
+      return;
+   }
+
+   if (suppressed)
+      RARCH_WARN("[Task] (%u further over-budget invocations suppressed)\n",
+            suppressed);
+
+   last_handler = task->handler;
+   suppressed   = 0;
+
+   RARCH_WARN("[Task] Handler occupied the main thread for %d ms"
+         " (budget %d ms)%s%s.\n",
+         (int)(usec / 1000), 16,
+         task->title ? " - " : "",
+         task->title ? task->title : "");
+}
+#endif
+
+/* Everything the queue takes from the configuration.  A session that
+ * comes up on the running queue - a content load - applies the
+ * settings here and leaves the queue itself alone: a change of
+ * Threaded Tasks takes effect at the next task_queue_check(), between
+ * frames, where the swap can join the worker without holding up a
+ * load. */
+#ifdef HAVE_THREADS
+/* The main thread runs the core and the menu, so the Games task: ahead
+ * of ordinary threads, never real time. */
+static thread_elevation_token_t retroarch_main_elevation;
+#endif
+
+void retroarch_main_thread_priority(bool raise)
+{
+#ifdef HAVE_THREADS
+   enum thread_elevation_result r = THREAD_ELEVATION_REFUSED;
+   if (!raise)
+      thread_elevation_lower_current(&retroarch_main_elevation);
+   else if ((r = thread_elevation_raise_current(THREAD_ELEVATION_TASK_GAMES,
+            &retroarch_main_elevation, NULL, NULL))
+         == THREAD_ELEVATION_GRANTED)
+      RARCH_LOG("[Core] Main thread priority raised.\n");
+   thread_elevation_note(THREAD_ELEVATION_SLOT_MAIN, r,
+         &retroarch_main_elevation, raise);
+#endif
+}
+
+void retroarch_task_queue_configure(void)
+{
+#ifdef HAVE_THREADS
+   settings_t *settings        = config_get_ptr();
+   bool threaded_enable        = settings->bools.threaded_data_runloop_enable;
+
+   /* Parallel tasks (shader stage compiles) get the cores left over
+    * once the main thread, the video thread and the one worker have
+    * theirs. */
+   {
+      unsigned cores = cpu_features_get_core_amount();
+      unsigned extra = cores > 3 ? cores - 3 : 0;
+#ifdef __EMSCRIPTEN__
+      /* these and the one worker fill PTHREAD_POOL_SIZE */
+      if (extra > 4)
+         extra = 4;
+#endif
+      task_queue_set_parallel_workers(extra);
+   }
+   if (threaded_enable)
+      task_queue_set_threaded();
+   else
+      task_queue_unset_threaded();
+   task_queue_set_prefer_fast_cores(settings->bools.thread_prefer_fast_cores);
+   /* The main thread runs the emulation loop; on a mixed-core part
+    * keep it off the slow cluster when asked. The task worker does the
+    * same for itself at start (task_queue_set_prefer_fast_cores above),
+    * the audio thread does in audio_thread_wrapper, the video thread
+    * in video_driver.c before video_init_thread(). */
+   if (settings->bools.thread_prefer_fast_cores)
+      sthread_prefer_fast_cores();
+   retroarch_main_thread_priority(settings->bools.main_thread_priority);
+#endif
+
+#ifdef DEBUG
+   /* Handlers that run on the thread that also drives the frame loop -
+    * every one with Threaded Tasks off, the main-thread ones with it
+    * on - are a visible stall when they do not return promptly, and
+    * the queue is the only place that can attribute one to a specific
+    * task rather than to "something in the frame".  Debug builds
+    * only: this exists to catch a regression during development, not
+    * to police release builds, and with no callback registered the
+    * queue reads no clock at all.
+    *
+    * The budget is a whole frame at 60Hz.  Handlers designed to be
+    * sliced (the budgeted directory walks, playlist parse and scan)
+    * aim far below it and consult the shared per-frame I/O window;
+    * anything crossing a full frame in one call is either
+    * unsliced work or a slice that has stopped honouring its
+    * budget. */
+   task_queue_set_slow_handler_cb(runloop_task_slow_handler, 16000);
+#endif
+
+   /* What one task_queue_check() may spend of the frame it runs in.
+    * Retirement: a burst of completions (a thumbnail scan, a bulk
+    * download) retires over several frames instead of one - at most
+    * 32 callbacks or 2 ms per check, whichever comes first. Handlers
+    * (unthreaded queue): 4 ms of handler time per check, the rest of
+    * the running list waits its turn. Both leave most of a 16.7 ms
+    * frame to the core; a blocking task_queue_wait() still loops
+    * until its condition holds. */
+   task_queue_set_budget(2000, 32, 4000);
+}
+
+void retroarch_init_task_queue(void)
+{
+#ifdef HAVE_THREADS
+   settings_t *settings        = config_get_ptr();
+   bool threaded_enable        = settings->bools.threaded_data_runloop_enable;
+#else
+   bool threaded_enable        = false;
+#endif
+
+   task_queue_deinit();
+#ifdef HAVE_NETWORKING
+   /* Before task_queue_init(), which is what spawns the task
+    * thread: net_http's DNS cache and connection pool locks must
+    * exist before any two transfers can race - created lazily on
+    * first use, the first two concurrent transfers of the process
+    * can each create one and then lock different objects. */
+   net_http_init();
+#endif
+#ifdef HAVE_THREADS
+   task_queue_set_prefer_fast_cores(settings->bools.thread_prefer_fast_cores);
+#endif
+   task_queue_init(threaded_enable, runloop_task_msg_queue_push);
+#ifdef HAVE_THREADS
+   /* The queue falls back to running tasks on the caller's thread when
+    * its worker or synchronisation primitives could not be created. */
+   if (threaded_enable && !task_queue_is_threaded())
+      RARCH_ERR("[Task] Threaded tasks were requested but could not be started; running tasks inline.\n");
+#endif
+   retroarch_task_queue_configure();
+}
+
+bool retroarch_main_deinit_begin(void)
+{
+   runloop_state_t     *runloop_st = runloop_state_get_ptr();
+   input_driver_state_t *input_st  = input_state_get_ptr();
+   if (!runloop_is_inited())
+   return false;
+   command_event(CMD_EVENT_NETPLAY_DEINIT, NULL);
+#ifdef HAVE_NETWORKING
+   /* Free netplay lobby state at shutdown. room_list and
+    * rooms_data are populated when browsing the netplay lobby
+    * and recycled on each refresh, but nothing frees them at
+    * exit, so the last-populated allocation leaks. This is the
+    * one-time teardown point: deinit_netplay() above runs on
+    * every session start/stop and must not free the lobby list
+    * (the menu may still be reading room_list to join a room). */
+   {
+      net_driver_state_t *net_st = networking_state_get_ptr();
+      netplay_rooms_free();
+      if (net_st->room_list)
+      {
+         free(net_st->room_list);
+         net_st->room_list  = NULL;
+      }
+      net_st->room_count = 0;
+#ifdef HAVE_NETPLAYDISCOVERY
+      /* Same story for the LAN discovery list, which is grown
+       * by the scan task and only ever truncated between
+       * scans. */
+      netplay_discovery_free_hosts();
+#endif
+   }
+#endif
+#ifdef HAVE_COMMAND
+   /* kept across a content load: the next session's driver init
+    * remakes them only if their settings changed */
+   if (!runloop_st->content_switching)
+      input_driver_deinit_command(input_st);
+#endif
+#ifdef HAVE_NETWORKGAMEPAD
+   if (input_st->remote)
+      input_remote_free(input_st->remote,
+            config_get_ptr()->uints.input_max_users);
+   input_st->remote = NULL;
+#endif
+   input_mapper_reset(&input_st->mapper);
+
+#ifdef HAVE_THREADS
+   if (runloop_st->flags & RUNLOOP_FLAG_USE_SRAM)
+      autosave_deinit();
+#endif
+
+   command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+
+   command_event(CMD_EVENT_SAVE_FILES, NULL);
+
+#ifdef HAVE_REWIND
+   command_event(CMD_EVENT_REWIND_DEINIT, NULL);
+#endif
+#ifdef HAVE_CHEATS
+   cheat_manager_state_free();
+#endif
+#ifdef HAVE_BSV_MOVIE
+   movie_stop(input_st);
+#endif
+   command_event_core_deinit_begin();
+   return true;
+}
+
+bool retroarch_main_deinit_pending(void)
+{
+   return command_event_core_deinit_pending();
+}
+
+void retroarch_main_deinit_finish(void)
+{
+   command_event_core_deinit_finish();
+
+   content_deinit();
+
+   runloop_path_deinit_subsystem();
+   path_deinit_savefile();
+
+   runloop_is_inited_clear();
+
+#ifdef HAVE_CLOUDSYNC
+   /* The save RAM is on disk and no core owns it.  On the way out
+    * the task queue has already been drained, so a sync is not
+    * started there. */
+   if (rarch_st.flags & RARCH_FLAGS_CLOUD_SYNC_ON_DEINIT)
+   {
+      rarch_st.flags &= ~RARCH_FLAGS_CLOUD_SYNC_ON_DEINIT;
+      if (!(runloop_state_get_ptr()->flags & RUNLOOP_FLAG_SHUTDOWN_INITIATED))
+         task_push_cloud_sync(NULL, NULL);
+   }
+#endif
+}
+
+bool retroarch_ctl(enum rarch_ctl_state state, void *data)
+{
+   struct rarch_state     *p_rarch = &rarch_st;
+   runloop_state_t     *runloop_st = runloop_state_get_ptr();
+
+   switch(state)
+   {
+#ifdef HAVE_BSV_MOVIE
+      case RARCH_CTL_BSV_MOVIE_IS_INITED:
+         return (input_state_get_ptr()->bsv_movie_state_handle != NULL);
+#endif
+#ifdef HAVE_PATCH
+      case RARCH_CTL_UNSET_BPS_PREF:
+         p_rarch->flags &= ~RARCH_FLAGS_BPS_PREF;
+         break;
+      case RARCH_CTL_UNSET_UPS_PREF:
+         p_rarch->flags &= ~RARCH_FLAGS_UPS_PREF;
+         break;
+      case RARCH_CTL_UNSET_IPS_PREF:
+         p_rarch->flags &= ~RARCH_FLAGS_IPS_PREF;
+         break;
+#ifdef HAVE_XDELTA
+      case RARCH_CTL_UNSET_XDELTA_PREF:
+         p_rarch->flags &= ~RARCH_FLAGS_XDELTA_PREF;
+         break;
+#endif /* HAVE_XDELTA */
+#endif /* HAVE_PATCH */
+      case RARCH_CTL_UNSET_LAUNCHED_FROM_CLI:
+         p_rarch->flags &= ~RARCH_FLAGS_LAUNCHED_FROM_CLI;
+         break;
+      case RARCH_CTL_IS_DUMMY_CORE:
+         return runloop_st->current_core_type == CORE_TYPE_DUMMY;
+      case RARCH_CTL_IS_CORE_LOADED:
+#ifdef HAVE_STATIC_DUMMY
+         /* A static dummy build links no libretro core, yet
+          * RARCH_PATH_CORE may still name one: on static
+          * platforms it is populated from the salamander
+          * config at startup, and the argv[0] overwrite in
+          * the frontend's process_args is skipped when the
+          * process is launched without arguments (e.g. via
+          * title override on Switch). Comparing names against
+          * that phantom path yields false positives, causing
+          * content to be loaded in-process into the dummy
+          * core instead of forking the real core, and history
+          * entries/runtime logs to be recorded against the
+          * wrong core. No core can ever be loaded in this
+          * process, so always report false. */
+         return false;
+#else
+         {
+            const char *core_path = (const char*)data;
+            const char *core_file = path_basename_nocompression(core_path);
+            if (core_file && *core_file)
+            {
+               /* Get loaded core file name */
+               const char *loaded_core_file = path_basename_nocompression(
+                     p_rarch->path_libretro);
+               /* Check whether specified core and currently
+                * loaded core are the same */
+               if (loaded_core_file && *loaded_core_file)
+                  if (string_is_equal(core_file, loaded_core_file))
+                     return true;
+            }
+         }
+         return false;
+#endif
+#if defined(HAVE_RUNAHEAD) && (defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB))
+      case RARCH_CTL_IS_SECOND_CORE_AVAILABLE:
+         return
+                  (runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING)
+               && (runloop_st->flags & RUNLOOP_FLAG_RUNAHEAD_SECONDARY_CORE_AVAILABLE);
+      case RARCH_CTL_IS_SECOND_CORE_LOADED:
+         return
+                   (runloop_st->flags & RUNLOOP_FLAG_CORE_RUNNING)
+               &&  (runloop_st->secondary_lib_handle != NULL);
+#endif
+      case RARCH_CTL_MAIN_DEINIT:
+         if (!retroarch_main_deinit_begin())
+            return false;
+         /* In one go: reached on exit and from the load at startup,
+          * before the first frame.  A load from the menu waits these
+          * out a frame at a time (task_content.c). */
+         content_wait_for_save_state_task();
+         content_wait_for_load_state_task();
+         retroarch_main_deinit_finish();
+         break;
+#ifdef HAVE_CONFIGFILE
+      case RARCH_CTL_SET_BLOCK_CONFIG_READ:
+         p_rarch->flags |= RARCH_FLAGS_BLOCK_CONFIG_READ;
+         break;
+      case RARCH_CTL_UNSET_BLOCK_CONFIG_READ:
+         p_rarch->flags &= ~RARCH_FLAGS_BLOCK_CONFIG_READ;
+         break;
+#endif
+      case RARCH_CTL_CORE_OPTIONS_LIST_GET:
+         {
+            core_option_manager_t **coreopts = (core_option_manager_t**)data;
+            if (!coreopts || !runloop_st->core_options)
+               return false;
+            *coreopts = runloop_st->core_options;
+         }
+         break;
+      case RARCH_CTL_CORE_OPTION_UPDATE_DISPLAY:
+         if (   runloop_st->core_options
+             && runloop_st->core_options_callback.update_display)
+         {
+            /* Note: The update_display() callback may read
+             * core option values via RETRO_ENVIRONMENT_GET_VARIABLE.
+             * This will reset the 'options updated' flag.
+             * We therefore have to cache the current 'options updated'
+             * state and restore it after the update_display() function
+             * returns */
+            bool values_updated  = runloop_st->core_options->updated;
+            bool display_updated = runloop_st->core_options_callback.update_display();
+
+            runloop_st->core_options->updated = values_updated;
+            return display_updated;
+         }
+         return false;
+#ifdef HAVE_CONFIGFILE
+      case RARCH_CTL_SET_REMAPS_CORE_ACTIVE:
+         /* Only one type of remap can be active
+          * at any one time */
+         runloop_st->flags &= ~(RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE
+                              | RUNLOOP_FLAG_REMAPS_GAME_ACTIVE);
+         runloop_st->flags |=   RUNLOOP_FLAG_REMAPS_CORE_ACTIVE;
+         break;
+      case RARCH_CTL_SET_REMAPS_GAME_ACTIVE:
+         runloop_st->flags &= ~(RUNLOOP_FLAG_REMAPS_CORE_ACTIVE
+                              | RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE);
+         runloop_st->flags |=   RUNLOOP_FLAG_REMAPS_GAME_ACTIVE;
+         break;
+      case RARCH_CTL_SET_REMAPS_CONTENT_DIR_ACTIVE:
+         runloop_st->flags &= ~(RUNLOOP_FLAG_REMAPS_CORE_ACTIVE
+                              | RUNLOOP_FLAG_REMAPS_GAME_ACTIVE);
+         runloop_st->flags |=   RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE;
+         break;
+#endif
+      case RARCH_CTL_GET_PERFCNT:
+         {
+            bool **perfcnt = (bool**)data;
+            if (!perfcnt)
+               return false;
+            *perfcnt = &runloop_st->perfcnt_enable;
+         }
+         break;
+      case RARCH_CTL_SET_PERFCNT_ENABLE:
+         runloop_st->perfcnt_enable = true;
+         break;
+      case RARCH_CTL_UNSET_PERFCNT_ENABLE:
+         runloop_st->perfcnt_enable = false;
+         break;
+      case RARCH_CTL_IS_PERFCNT_ENABLE:
+         return runloop_st->perfcnt_enable;
+      case RARCH_CTL_SET_WINDOWED_SCALE:
+         {
+            unsigned *idx = (unsigned*)data;
+            if (!idx)
+               return false;
+            runloop_st->pending_windowed_scale = *idx;
+         }
+         break;
+      case RARCH_CTL_STATE_FREE:
+         {
+            input_driver_state_t *input_st = input_state_get_ptr();
+            runloop_st->perfcnt_enable     = false;
+#ifdef HAVE_CONFIGFILE
+            runloop_st->flags             &= ~RUNLOOP_FLAG_OVERRIDES_ACTIVE;
+#endif
+            runloop_st->flags             &= ~(RUNLOOP_FLAG_AUTOSAVE
+                                           |   RUNLOOP_FLAG_SLOWMOTION
+                                           |   RUNLOOP_FLAG_IDLE
+                                           |   RUNLOOP_FLAG_PAUSED
+                                              );
+            runloop_state_free(runloop_st);
+
+            memset(&input_st->analog_requested, 0,
+                  sizeof(input_st->analog_requested));
+            memset(&input_st->touchpad_requested, 0,
+                  sizeof(input_st->touchpad_requested));
+         }
+         break;
+      case RARCH_CTL_SET_SHUTDOWN:
+         runloop_st->flags |= RUNLOOP_FLAG_SHUTDOWN_INITIATED;
+         break;
+      case RARCH_CTL_CORE_OPTION_PREV:
+         /*
+          * Get previous value for core option specified by @idx.
+          * Options wrap around.
+          */
+         {
+            unsigned *idx = (unsigned*)data;
+            if (!idx || !runloop_st->core_options)
+               return false;
+            core_option_manager_adjust_val(runloop_st->core_options,
+                  *idx, -1, true);
+         }
+         break;
+      case RARCH_CTL_CORE_OPTION_NEXT:
+         /*
+          * Get next value for core option specified by @idx.
+          * Options wrap around.
+          */
+         {
+            unsigned* idx = (unsigned*)data;
+            if (!idx || !runloop_st->core_options)
+               return false;
+            core_option_manager_adjust_val(runloop_st->core_options,
+                  *idx, 1, true);
+         }
+         break;
+      case RARCH_CTL_NONE:
+      default:
+         return false;
+   }
+
+   return true;
+}
+
+bool retroarch_override_setting_is_set(
+      enum rarch_override_setting enum_idx, void *data)
+{
+   struct rarch_state *p_rarch = &rarch_st;
+#ifdef HAVE_NETWORKING
+   net_driver_state_t *net_st  = networking_state_get_ptr();
+#endif
+
+   switch (enum_idx)
+   {
+      case RARCH_OVERRIDE_SETTING_LIBRETRO_DEVICE:
+         {
+            unsigned *val = (unsigned*)data;
+            if (val)
+            {
+               unsigned                bit = *val;
+               runloop_state_t *runloop_st = runloop_state_get_ptr();
+               return BIT256_GET(runloop_st->has_set_libretro_device, bit);
+            }
+         }
+         break;
+      case RARCH_OVERRIDE_SETTING_VERBOSITY:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_VERBOSITY) > 0);
+      case RARCH_OVERRIDE_SETTING_LIBRETRO:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_LIBRETRO) > 0);
+      case RARCH_OVERRIDE_SETTING_LIBRETRO_DIRECTORY:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_LIBRETRO_DIRECTORY) > 0);
+      case RARCH_OVERRIDE_SETTING_SAVE_PATH:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_SAVE_PATH) > 0);
+      case RARCH_OVERRIDE_SETTING_STATE_PATH:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_STATE_PATH) > 0);
+#ifdef HAVE_NETWORKING
+      case RARCH_OVERRIDE_SETTING_NETPLAY_MODE:
+         return ((net_st->flags & NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_MODE) > 0);
+      case RARCH_OVERRIDE_SETTING_NETPLAY_IP_ADDRESS:
+         return ((net_st->flags & NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_IP_ADDRESS) > 0);
+      case RARCH_OVERRIDE_SETTING_NETPLAY_IP_PORT:
+         return ((net_st->flags & NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_IP_PORT) > 0);
+      case RARCH_OVERRIDE_SETTING_NETPLAY_CHECK_FRAMES:
+         return ((net_st->flags & NET_DRIVER_ST_FLAG_HAS_SET_NETPLAY_CHECK_FRAMES) > 0);
+#endif
+#ifdef HAVE_PATCH
+      case RARCH_OVERRIDE_SETTING_UPS_PREF:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_UPS_PREF) > 0);
+      case RARCH_OVERRIDE_SETTING_BPS_PREF:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_BPS_PREF) > 0);
+      case RARCH_OVERRIDE_SETTING_IPS_PREF:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_IPS_PREF) > 0);
+#ifdef HAVE_XDELTA
+      case RARCH_OVERRIDE_SETTING_XDELTA_PREF:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_XDELTA_PREF) > 0);
+#endif /* HAVE_XDELTA */
+#endif /* HAVE_PATCH */
+      case RARCH_OVERRIDE_SETTING_LOG_TO_FILE:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_LOG_TO_FILE) > 0);
+      case RARCH_OVERRIDE_SETTING_DATABASE_SCAN:
+         return ((p_rarch->flags & RARCH_FLAGS_CLI_DATABASE_SCAN) > 0);
+      case RARCH_OVERRIDE_SETTING_OVERLAY_PRESET:
+         return ((p_rarch->flags & RARCH_FLAGS_HAS_SET_OVERLAY_PRESET) > 0);
+      case RARCH_OVERRIDE_SETTING_NONE:
+      default:
+         break;
+   }
+
+   return false;
+}
+
+size_t retroarch_get_capabilities(enum rarch_capabilities type,
+      char *s, size_t len)
+{
+   size_t _len = 0;
+   switch (type)
+   {
+      case RARCH_CAPABILITIES_CPU:
+         {
+            /* Each name carries its own separator, so appending one is
+             * a single bounded copy. */
+            static const struct
+            {
+               uint64_t    bit;
+               const char *name;
+            } simd_names[] = {
+               { RETRO_SIMD_MMX,    "MMX " },
+               { RETRO_SIMD_MMXEXT, "MMXEXT " },
+               { RETRO_SIMD_SSE,    "SSE " },
+               { RETRO_SIMD_SSE2,   "SSE2 " },
+               { RETRO_SIMD_SSE3,   "SSE3 " },
+               { RETRO_SIMD_SSSE3,  "SSSE3 " },
+               { RETRO_SIMD_SSE4,   "SSE4 " },
+               { RETRO_SIMD_SSE42,  "SSE42 " },
+               { RETRO_SIMD_AES,    "AES " },
+               { RETRO_SIMD_PCLMUL, "PCLMUL " },
+               { RETRO_SIMD_AVX,    "AVX " },
+               { RETRO_SIMD_AVX2,   "AVX2 " },
+               { RETRO_SIMD_AVX512, "AVX512 " },
+               { RETRO_SIMD_FMA3,   "FMA3 " },
+               { RETRO_SIMD_FMA4,   "FMA4 " },
+               { RETRO_SIMD_LZCNT,  "LZCNT " },
+               { RETRO_SIMD_NEON,   "NEON " },
+               { RETRO_SIMD_VFPV3,  "VFPV3 " },
+               { RETRO_SIMD_VFPV4,  "VFPV4 " },
+               { RETRO_SIMD_VMX,    "VMX " },
+               { RETRO_SIMD_VMX128, "VMX128 " },
+               { RETRO_SIMD_VFPU,   "VFPU " },
+               { RETRO_SIMD_PS,     "PS " },
+               { RETRO_SIMD_ASIMD,  "ASIMD " },
+               { RETRO_SIMD_CRC32,  "CRC32 " },
+               { RETRO_SIMD_SHA512, "SHA512 " },
+               { RETRO_SIMD_SHA1,   "SHA1 " },
+               { RETRO_SIMD_SHA256, "SHA256 " },
+            };
+            uint64_t cpu = cpu_features_get();
+            size_t   i;
+
+            /* A mask with nothing in it still has to leave a string
+             * behind: the callers hand this an uninitialised buffer
+             * and print it. */
+            if (len)
+               s[0] = '\0';
+
+            for (i = 0; i < ARRAY_SIZE(simd_names); i++)
+            {
+               size_t nlen;
+
+               if (!(cpu & simd_names[i].bit))
+                  continue;
+
+               /* Stop while the remaining count is still a count.
+                * strlcpy() reports what it would have written, so
+                * adding its return once it has truncated carries _len
+                * past len and turns every later len - _len into a
+                * very large size_t. */
+               nlen = strlen(simd_names[i].name);
+               if (_len + nlen >= len)
+                  break;
+
+               _len += strlcpy(s + _len, simd_names[i].name, len - _len);
+            }
+         }
+         break;
+      case RARCH_CAPABILITIES_COMPILER:
+#if defined(_MSC_VER)
+         _len += strlcpy (s + _len, msg_hash_to_str(MSG_COMPILER), len - _len);
+         _len += snprintf(s + _len, len - _len, ": MSVC (%d)",
+               _MSC_VER);
+#elif defined(__SNC__)
+         _len += strlcpy (s + _len, msg_hash_to_str(MSG_COMPILER), len - _len);
+         _len += snprintf(s + _len, len - _len, ": SNC (%d)",
+               __SN_VER__);
+#elif defined(_WIN32) && defined(__GNUC__)
+         _len += strlcpy (s + _len, msg_hash_to_str(MSG_COMPILER), len - _len);
+         _len += snprintf(s + _len, len - _len, ": MinGW (%d.%d.%d)",
+               __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+#elif defined(__clang__)
+         _len += strlcpy(s + _len, msg_hash_to_str(MSG_COMPILER), len - _len);
+         _len += strlcpy_lit(s + _len, ": Clang/LLVM (", len - _len);
+         _len += strlcpy(s + _len, __clang_version__, len - _len);
+         _len += strlcpy_lit(s + _len, ")", len - _len);
+#elif defined(__GNUC__)
+         _len += strlcpy (s + _len, msg_hash_to_str(MSG_COMPILER), len - _len);
+         _len += snprintf(s + _len, len - _len, ": GCC (%d.%d.%d)",
+               __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+#else
+         _len += strlcpy(s + _len, msg_hash_to_str(MSG_UNKNOWN_COMPILER), len - _len);
+#endif
+         _len += snprintf(s + _len, len - _len, " %u-bit",
+               (unsigned)(CHAR_BIT * sizeof(size_t)));
+         break;
+      default:
+      case RARCH_CAPABILITIES_NONE:
+         break;
+   }
+   return _len;
+}
+
+void retroarch_fail(int err_code, const char *err)
+{
+   strlcpy(rarch_st.error_string, err,
+         sizeof(rarch_st.error_string));
+
+   /* Only longjmp if retroarch_main_init's setjmp is still live.
+    * Outside that scope (e.g. when drivers_init runs from
+    * command_event_reinit for a fullscreen toggle, video driver
+    * swap, or any other CMD_EVENT_REINIT path) the
+    * error_sjlj_context jmp_buf points into stack memory that
+    * was unwound long ago. Jumping there is undefined behavior;
+    * on most platforms it crashes or silently corrupts state.
+    *
+    * Driver init failures during reinit are not recoverable in
+    * this function (we don't have a clean rollback path for the
+    * partial reinit), but they're survivable - the prior driver
+    * state is gone but we can leave the user in the menu rather
+    * than crashing. The caller (drivers_init) will see the
+    * subsystem fail to init and that subsystem's downstream code
+    * is expected to NULL-check its driver pointers. */
+   if (rarch_st.flags & RARCH_FLAGS_INIT_IN_PROGRESS)
+      longjmp(rarch_st.error_sjlj_context, err_code);
+
+   RARCH_ERR("[Core] retroarch_fail outside retroarch_main_init: %s\n",
+         err);
+}
+
+/* Called on close content, checks if we need to also exit retroarch */
+bool should_quit_on_close(void)
+{
+#ifdef HAVE_MENU
+   settings_t *settings   = config_get_ptr();
+   if (       ((settings->uints.quit_on_close_content ==
+               QUIT_ON_CLOSE_CONTENT_CLI)
+            && (rarch_st.flags & RARCH_FLAGS_LAUNCHED_FROM_CLI))
+            || (settings->uints.quit_on_close_content ==
+               QUIT_ON_CLOSE_CONTENT_ENABLED)
+      )
+      return true;
+#endif
+   return false;
+}
+
+/* Quitting, in two halves around the wait for the auto save-state the
+ * first half pushes: the state file is only whole once its task is
+ * through, and the runtime log, remaps and config written by the second
+ * half are the quit's last word.  retroarch_main_quit() waits between
+ * the halves in one go; a quit from inside the frame loop
+ * (retroarch_main_quit_staged()) returns to the loop between them, which
+ * presents the last frame and the "Saving state" notice while the state
+ * is written and finishes the quit once it is.
+ *
+ * Returns whether this is the quit's first pass, the one that saves
+ * what a quit saves; false once shutdown has already begun. */
+static bool retroarch_main_quit_begin(void)
+{
+   runloop_state_t *runloop_st   = runloop_state_get_ptr();
+   video_driver_state_t*video_st = video_state_get_ptr();
+   settings_t *settings          = config_get_ptr();
+#if !defined(HAVE_DYNAMIC)
+   bool config_save_on_exit      = settings->bools.config_save_on_exit;
+#endif
+
+   /* Let the desktop companion snapshot its window/dock layout into
+    * settings_t before the config is written below; its own
+    * deinit runs only after the run loop has left, too late. */
+   ui_companion_event_command(CMD_EVENT_QUIT);
+
+   /* Restore video driver before saving */
+   video_driver_restore_cached(settings);
+
+   /* Restore original refresh rate, if it has been changed
+    * automatically in SET_SYSTEM_AV_INFO */
+   if (video_st->video_refresh_rate_original)
+      video_display_server_restore_refresh_rate();
+
+#if !defined(HAVE_DYNAMIC)
+   {
+      /* Salamander sets RUNLOOP_FLAG_SHUTDOWN_INITIATED prior, so we need to handle it separately */
+      /* config_save_file_salamander() must be called independent of config_save_on_exit */
+      config_save_file_salamander();
+      if (config_save_on_exit)
+         command_event(CMD_EVENT_MENU_SAVE_CURRENT_CONFIG, NULL);
+   }
+#endif
+
+#ifdef HAVE_PRESENCE
+   {
+      presence_userdata_t userdata;
+      userdata.status = PRESENCE_SHUTDOWN;
+      command_event(CMD_EVENT_PRESENCE_UPDATE, &userdata);
+   }
+#endif
+#ifdef HAVE_DISCORD
+   {
+      discord_state_t *discord_st = discord_state_get_ptr();
+      if (discord_st->ready)
+      {
+         Discord_ClearPresence();
+         Discord_UpdateConnection();
+         Discord_Shutdown();
+         discord_st->ready       = false;
+      }
+      discord_st->inited         = false;
+      runloop_st->frame_work    &= ~RUNLOOP_WORK_DISCORD;
+#ifndef HAVE_MIST
+      runloop_st->frame_work    &= ~RUNLOOP_WORK_PRESENCE;
+#endif
+   }
+#endif
+
+   if (runloop_st->flags & RUNLOOP_FLAG_SHUTDOWN_INITIATED)
+      return false;
+   recording_gpu_stop();
+   if (recording_state_get_ptr()->start_pending)
+      command_event(CMD_EVENT_RECORD_DEINIT, NULL);
+   if (   settings->bools.savestate_auto_save
+       && runloop_st->current_core_type != CORE_TYPE_DUMMY)
+      command_event_save_auto_state();
+   return true;
+}
+
+/* The second half, once no state task is writing; first as
+ * retroarch_main_quit_begin() returned it. */
+static void retroarch_main_quit_finish(bool first)
+{
+   runloop_state_t *runloop_st   = runloop_state_get_ptr();
+   settings_t *settings          = config_get_ptr();
+#if defined(HAVE_DYNAMIC)
+   bool config_save_on_exit      = settings->bools.config_save_on_exit;
+#endif
+
+   if (first)
+   {
+      runloop_runtime_log_deinit(runloop_st,
+            settings->bools.content_runtime_log,
+            settings->bools.content_runtime_log_aggregate,
+            settings->paths.directory_runtime_log,
+            settings->paths.directory_playlist);
+
+      if (     (runloop_st->flags & RUNLOOP_FLAG_REMAPS_CORE_ACTIVE)
+            || (runloop_st->flags & RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE)
+            || (runloop_st->flags & RUNLOOP_FLAG_REMAPS_GAME_ACTIVE)
+            || (runloop_st->name.remapfile && *runloop_st->name.remapfile)
+         )
+      {
+         input_remapping_deinit(settings->bools.remap_save_on_exit);
+         input_remapping_set_defaults(true);
+      }
+      else
+         input_remapping_restore_global_config(true, false);
+
+#ifdef HAVE_CONFIGFILE
+      /* Reload the original config */
+      if (runloop_st->flags & RUNLOOP_FLAG_OVERRIDES_ACTIVE)
+         config_unload_override();
+#endif
+
+#ifdef HAVE_MENU
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+      /* Restore shader option state after temporary fast toggling */
+      {
+         const struct video_shader *menu_shader = menu_shader_get();
+         if (menu_shader && menu_shader->flags & SHDR_FLAG_TEMPORARY)
+         {
+            bool enabled = !(menu_shader->flags & SHDR_FLAG_DISABLED);
+            configuration_set_bool(settings, settings->bools.video_shader_enable, enabled);
+         }
+      }
+#endif
+#endif
+
+      /* Save configs before quitting
+       * as for UWP depending on `OnSuspending` is not important as we can call it directly here
+       * specifically we need to get width,height which requires UI thread and it will not be available on exit
+       */
+#if defined(HAVE_DYNAMIC)
+      if (config_save_on_exit)
+         command_event(CMD_EVENT_MENU_SAVE_CURRENT_CONFIG, NULL);
+#endif
+
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+      runloop_st->runtime_shader_preset_path[0] = '\0';
+#endif
+   }
+
+   runloop_st->flags |= RUNLOOP_FLAG_SHUTDOWN_INITIATED;
+#ifdef HAVE_MENU
+   retroarch_menu_running_finished(true);
+#endif
+
+#ifdef HAVE_GAME_AI
+   game_ai_shutdown();
+#endif
+
+#if defined(WEBOS) && defined(HAVE_WAYLAND)
+   shutdown_webos_contexts();
+#endif
+
+#ifdef HAVE_SMBCLIENT
+   smb_shutdown();
+#endif
+#ifdef HAVE_NFSCLIENT
+   nfs_shutdown();
+#endif
+}
+
+/* A state task the quit has to see through: a save still writing, or
+ * the load a save over an existing file makes first, into the undo
+ * buffer - its callback pushes the save itself, so the save is not
+ * pending until that load is through.  The callback clears the one and
+ * sets the other in one go on this thread, so between the two flags
+ * there is no moment with neither. */
+static bool retroarch_quit_state_task_pending(void *data)
+{
+   (void)data;
+   return content_save_state_in_progress(NULL)
+       || content_load_state_in_progress(NULL);
+}
+
+/* Also saves configuration files to disk, and (optionally) the auto
+ * save-state, waiting for it to be written. */
+bool retroarch_main_quit(void)
+{
+   bool first = retroarch_main_quit_begin();
+   /* A state task still writing - the auto-save just pushed, or one
+    * the user started - would leave a truncated file behind the exit. */
+   if (first)
+      task_queue_wait(retroarch_quit_state_task_pending, NULL);
+   retroarch_main_quit_finish(first);
+   return true;
+}
+
+/* CMD_EVENT_QUIT: a quit asked for from inside the frame loop - the
+ * menu, the quit hotkey, the window's close button, a platform's
+ * request handled there.  While a state is still being written the
+ * loop keeps presenting until it is (runloop_iterate() asks
+ * retroarch_main_quit_poll() each frame) instead of freezing on it.
+ *
+ * Blocks as retroarch_main_quit() does where the loop cannot carry
+ * the wait: with no window to present into, and on the consoles whose
+ * frame pumps the system's own messages (the applet and APT loops in
+ * runloop_check_state(), which a waiting frame does not reach).  A
+ * quit the operating system forces calls retroarch_main_quit()
+ * directly and blocks too: the process may end the moment it returns. */
+bool retroarch_main_quit_staged(void)
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+#if !defined(HAVE_LIBNX) && !defined(_3DS)
+   video_driver_state_t *video_st = video_state_get_ptr();
+   bool first;
+#endif
+
+   if (runloop_st->quit_pending)
+      return true;
+#if defined(HAVE_LIBNX) || defined(_3DS)
+   return retroarch_main_quit();
+#else
+   if (    (!video_st->current_video
+         || !video_st->data
+         || !video_st->current_video->alive
+         || !video_st->current_video->alive(video_st->data))
+         && !recording_gpu_pending())
+      return retroarch_main_quit();
+
+   first = retroarch_main_quit_begin();
+   if (!first || (!retroarch_quit_state_task_pending(NULL) && !recording_gpu_pending()))
+   {
+      retroarch_main_quit_finish(first);
+      return true;
+   }
+
+   /* The core is not run again (core_run's guard): the state task may
+    * be serializing it, and the session ends with this quit. */
+   runloop_st->quit_pending    = true;
+   runloop_st->content_closing = true;
+   if (retroarch_quit_state_task_pending(NULL))
+   {
+      const char *_msg = msg_hash_to_str(MSG_SAVING_STATE);
+      runloop_msg_queue_push(_msg, strlen(_msg), 1, 180, true,
+            NULL, MESSAGE_QUEUE_ICON_DEFAULT,
+            MESSAGE_QUEUE_CATEGORY_INFO);
+   }
+   return true;
+#endif
+}
+
+/* Asked once a frame while a staged quit waits: true once the state is
+ * written and the quit finished, when the loop is to end. */
+bool retroarch_main_quit_poll(void)
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+
+   if (!runloop_st->quit_pending)
+      return false;
+   recording_gpu_poll();
+   if (retroarch_quit_state_task_pending(NULL) || recording_gpu_pending())
+      return false;
+   runloop_st->quit_pending = false;
+   retroarch_main_quit_finish(true);
+   return true;
+}
+
+enum retro_language retroarch_get_language_from_iso(const char *iso639)
+{
+   size_t i;
+   enum retro_language lang = RETRO_LANGUAGE_ENGLISH;
+
+   struct lang_pair
+   {
+      const char *iso639;
+      enum retro_language lang;
+   };
+
+   const struct lang_pair pairs[] =
+   {
+      {"ja", RETRO_LANGUAGE_JAPANESE},
+      {"fr", RETRO_LANGUAGE_FRENCH},
+      {"es", RETRO_LANGUAGE_SPANISH},
+      {"de", RETRO_LANGUAGE_GERMAN},
+      {"it", RETRO_LANGUAGE_ITALIAN},
+      {"nl", RETRO_LANGUAGE_DUTCH},
+      {"pt_BR", RETRO_LANGUAGE_PORTUGUESE_BRAZIL},
+      {"pt_PT", RETRO_LANGUAGE_PORTUGUESE_PORTUGAL},
+      {"pt", RETRO_LANGUAGE_PORTUGUESE_PORTUGAL},
+      {"ru", RETRO_LANGUAGE_RUSSIAN},
+      {"ko", RETRO_LANGUAGE_KOREAN},
+      {"zh_CN", RETRO_LANGUAGE_CHINESE_SIMPLIFIED},
+      {"zh_SG", RETRO_LANGUAGE_CHINESE_SIMPLIFIED},
+      {"zh_HK", RETRO_LANGUAGE_CHINESE_TRADITIONAL},
+      {"zh_TW", RETRO_LANGUAGE_CHINESE_TRADITIONAL},
+      {"zh", RETRO_LANGUAGE_CHINESE_SIMPLIFIED},
+      {"eo", RETRO_LANGUAGE_ESPERANTO},
+      {"pl", RETRO_LANGUAGE_POLISH},
+      {"vi", RETRO_LANGUAGE_VIETNAMESE},
+      {"ar", RETRO_LANGUAGE_ARABIC},
+      {"el", RETRO_LANGUAGE_GREEK},
+      {"tr", RETRO_LANGUAGE_TURKISH},
+      {"sk", RETRO_LANGUAGE_SLOVAK},
+      {"fa", RETRO_LANGUAGE_PERSIAN},
+      {"he", RETRO_LANGUAGE_HEBREW},
+      {"ast", RETRO_LANGUAGE_ASTURIAN},
+      {"fi", RETRO_LANGUAGE_FINNISH},
+      {"id", RETRO_LANGUAGE_INDONESIAN},
+      {"sv", RETRO_LANGUAGE_SWEDISH},
+      {"uk", RETRO_LANGUAGE_UKRAINIAN},
+      {"cs", RETRO_LANGUAGE_CZECH},
+      {"ca_ES@valencia", RETRO_LANGUAGE_CATALAN_VALENCIA},
+      {"en_CA", RETRO_LANGUAGE_BRITISH_ENGLISH}, /* Canada must be indexed before Catalan's "ca". */
+      {"ca", RETRO_LANGUAGE_CATALAN},
+      {"en_GB", RETRO_LANGUAGE_BRITISH_ENGLISH},
+      {"en", RETRO_LANGUAGE_ENGLISH},
+      {"hu", RETRO_LANGUAGE_HUNGARIAN},
+      {"be", RETRO_LANGUAGE_BELARUSIAN},
+      {"gl", RETRO_LANGUAGE_GALICIAN},
+      {"no", RETRO_LANGUAGE_NORWEGIAN},
+      {"ga", RETRO_LANGUAGE_IRISH},
+      {"th", RETRO_LANGUAGE_THAI},
+   };
+
+   if (!iso639 || !*iso639)
+      return lang;
+
+   for (i = 0; i < ARRAY_SIZE(pairs); i++)
+   {
+      if (string_starts_with_case_insensitive(iso639, pairs[i].iso639))
+      {
+         lang = pairs[i].lang;
+         break;
+      }
+   }
+
+   return lang;
+}
+
+void retroarch_favorites_init(void)
+{
+   settings_t *settings                = config_get_ptr();
+   int content_favorites_size          = settings ? settings->ints.content_favorites_size : 0;
+   const char *path_content_favorites  = settings ? settings->paths.path_content_favorites : NULL;
+   bool playlist_sort_alphabetical     = settings ? settings->bools.playlist_sort_alphabetical : false;
+   playlist_config_t playlist_config;
+   enum playlist_sort_mode current_sort_mode;
+
+   playlist_config.capacity            = COLLECTION_SIZE;
+   playlist_config.old_format          = settings ? settings->bools.playlist_use_old_format : false;
+   playlist_config.compress            = settings ? settings->bools.playlist_compression : false;
+   playlist_config.fuzzy_archive_match = settings ? settings->bools.playlist_fuzzy_archive_match : false;
+   playlist_config_set_base_content_directory(&playlist_config, NULL);
+
+   if (!settings || (rarch_st.flags & RARCH_FLAGS_USER_DIRS_HELD))
+      return;
+
+   if (content_favorites_size >= 0)
+      playlist_config.capacity = (size_t)content_favorites_size;
+
+   retroarch_favorites_deinit();
+
+   if (!playlist_config.capacity || (!path_content_favorites || !*path_content_favorites))
+      return;
+
+   RARCH_LOG("[Playlist] %s: \"%s\".\n",
+         msg_hash_to_str(MSG_LOADING_FAVORITES_FILE),
+         path_content_favorites);
+   playlist_config_set_path(&playlist_config, path_content_favorites);
+   g_defaults.content_favorites = playlist_init(&playlist_config);
+
+   /* Get current per-playlist sort mode */
+   current_sort_mode = playlist_get_sort_mode(g_defaults.content_favorites);
+
+   /* Ensure that playlist is sorted alphabetically,
+    * if required */
+   if (   (playlist_sort_alphabetical && (current_sort_mode == PLAYLIST_SORT_MODE_DEFAULT))
+       || (current_sort_mode == PLAYLIST_SORT_MODE_ALPHABETICAL))
+      playlist_qsort(g_defaults.content_favorites);
+}
+
+void retroarch_favorites_deinit(void)
+{
+   if (!g_defaults.content_favorites)
+      return;
+
+   playlist_write_file(g_defaults.content_favorites);
+   playlist_free(g_defaults.content_favorites);
+   g_defaults.content_favorites = NULL;
+}
+
+#ifdef HAVE_ACCESSIBILITY
+bool accessibility_speak_priority(
+      bool accessibility_enable,
+      unsigned accessibility_narrator_speech_speed,
+      const char* speak_text, int priority)
+{
+   access_state_t *access_st   = access_state_get_ptr();
+   if (is_accessibility_enabled(
+            accessibility_enable,
+            access_st->enabled))
+   {
+
+      frontend_ctx_driver_t *frontend =
+         frontend_state_get_ptr()->current_frontend_ctx;
+
+      RARCH_DBG("[Accessibility] Spoke: \"%s\".\n", speak_text);
+
+      if (frontend && frontend->accessibility_speak)
+         return frontend->accessibility_speak(accessibility_narrator_speech_speed, speak_text,
+               priority);
+      /* The following method is a fallback for other platforms to use the
+         AI Service url to do the TTS.  However, since the playback is done
+         via the audio mixer, which only processes the audio while the
+         core is running, this playback method won't work.  When the audio
+         mixer can handle playing streams while the core is paused, then
+         we can use this. */
+#if 0
+#if defined(HAVE_NETWORKING)
+         return accessibility_speak_ai_service(speak_text, voice, priority);
+#endif
+#endif
+   }
+
+   return true;
+}
+
+#endif

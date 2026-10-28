@@ -1,0 +1,305 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2017 - Hans-Kristian Arntzen
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef GLSLANG_UTIL_H
+#define GLSLANG_UTIL_H
+
+#include <stdint.h>
+#include <retro_common_api.h>
+#include <retro_inline.h>
+
+#include "glslang_compile.h"
+#include "../video_shader_parse.h"
+
+typedef enum glslang_format
+{
+   SLANG_FORMAT_UNKNOWN = 0,
+
+   /* 8-bit */
+   SLANG_FORMAT_R8_UNORM,
+   SLANG_FORMAT_R8_UINT,
+   SLANG_FORMAT_R8_SINT,
+   SLANG_FORMAT_R8G8_UNORM,
+   SLANG_FORMAT_R8G8_UINT,
+   SLANG_FORMAT_R8G8_SINT,
+   SLANG_FORMAT_R8G8B8A8_UNORM,
+   SLANG_FORMAT_R8G8B8A8_UINT,
+   SLANG_FORMAT_R8G8B8A8_SINT,
+   SLANG_FORMAT_R8G8B8A8_SRGB,
+
+   /* 10-bit */
+   SLANG_FORMAT_A2B10G10R10_UNORM_PACK32,
+   SLANG_FORMAT_A2B10G10R10_UINT_PACK32,
+
+   /* 16-bit */
+   SLANG_FORMAT_R16_UINT,
+   SLANG_FORMAT_R16_SINT,
+   SLANG_FORMAT_R16_SFLOAT,
+   SLANG_FORMAT_R16G16_UINT,
+   SLANG_FORMAT_R16G16_SINT,
+   SLANG_FORMAT_R16G16_SFLOAT,
+   SLANG_FORMAT_R16G16B16A16_UINT,
+   SLANG_FORMAT_R16G16B16A16_SINT,
+   SLANG_FORMAT_R16G16B16A16_SFLOAT,
+
+   /* 32-bit */
+   SLANG_FORMAT_R32_UINT,
+   SLANG_FORMAT_R32_SINT,
+   SLANG_FORMAT_R32_SFLOAT,
+   SLANG_FORMAT_R32G32_UINT,
+   SLANG_FORMAT_R32G32_SINT,
+   SLANG_FORMAT_R32G32_SFLOAT,
+   SLANG_FORMAT_R32G32B32A32_UINT,
+   SLANG_FORMAT_R32G32B32A32_SINT,
+   SLANG_FORMAT_R32G32B32A32_SFLOAT,
+
+   SLANG_FORMAT_MAX
+} glslang_format;
+
+static INLINE enum glslang_format glslang_hdr_output_format(
+      const struct video_shader *shader, unsigned pass,
+      enum glslang_format format)
+{
+   if (shader && pass + 1 == shader->passes)
+   {
+      int mode = video_shader_get_hdr_mode(shader);
+      if (mode == 0 && format == SLANG_FORMAT_R8G8B8A8_SRGB)
+         return SLANG_FORMAT_R8G8B8A8_UNORM;
+      if (mode == 1)
+         return SLANG_FORMAT_A2B10G10R10_UNORM_PACK32;
+      if (mode == 2)
+         return SLANG_FORMAT_R16G16B16A16_SFLOAT;
+   }
+   return format;
+}
+
+static INLINE enum glslang_format glslang_hdr_output_encoding(
+      const struct video_shader *shader, enum glslang_format legacy)
+{
+   int mode = video_shader_get_hdr_mode(shader);
+   if (mode == 0)
+      return SLANG_FORMAT_UNKNOWN;
+   if (mode == 1)
+      return SLANG_FORMAT_A2B10G10R10_UNORM_PACK32;
+   if (mode == 2)
+      return SLANG_FORMAT_R16G16B16A16_SFLOAT;
+   return legacy;
+}
+
+/* Textures with built-in meaning. */
+typedef enum slang_texture_semantic
+{
+   /* The input texture to the filter chain.
+    * Canonical name: "Original". */
+   SLANG_TEXTURE_SEMANTIC_ORIGINAL         = 0,
+
+   /* The output from pass N - 1 if executing pass N, or ORIGINAL
+    * if pass #0 is executed.
+    * Canonical name: "Source".
+    */
+   SLANG_TEXTURE_SEMANTIC_SOURCE           = 1,
+
+   /* The original inputs with a history back in time.
+    * Canonical name: "OriginalHistory#", e.g. "OriginalHistory2" <- Two frames back.
+    * "OriginalHistory0" is an alias for SEMANTIC_ORIGINAL.
+    * Size name: "OriginalHistorySize#".
+    */
+   SLANG_TEXTURE_SEMANTIC_ORIGINAL_HISTORY = 2,
+
+   /* The output from pass #N, where pass #0 is the first pass.
+    * Canonical name: "PassOutput#", e.g. "PassOutput3".
+    * Size name: "PassOutputSize#".
+    */
+   SLANG_TEXTURE_SEMANTIC_PASS_OUTPUT      = 3,
+
+   /* The output from pass #N, one frame ago where pass #0 is the first pass.
+    * It is not valid to use the pass feedback from a pass which is not offscreen.
+    * Canonical name: "PassFeedback#", e.g. "PassFeedback2".
+    */
+   SLANG_TEXTURE_SEMANTIC_PASS_FEEDBACK    = 4,
+
+   /* Inputs from static textures, defined by the user.
+    * There is no canonical name, and the only way to use these semantics are by
+    * remapping.
+    */
+   SLANG_TEXTURE_SEMANTIC_USER             = 5,
+
+   SLANG_NUM_TEXTURE_SEMANTICS,
+   SLANG_INVALID_TEXTURE_SEMANTIC       = -1
+} slang_texture_semantic;
+
+typedef enum glslang_filter_chain_filter
+{
+   GLSLANG_FILTER_CHAIN_LINEAR  = 0,
+   GLSLANG_FILTER_CHAIN_NEAREST = 1,
+   GLSLANG_FILTER_CHAIN_COUNT
+} glslang_filter_chain_filter;
+
+typedef enum glslang_filter_chain_address
+{
+   GLSLANG_FILTER_CHAIN_ADDRESS_REPEAT               = 0,
+   GLSLANG_FILTER_CHAIN_ADDRESS_MIRRORED_REPEAT      = 1,
+   GLSLANG_FILTER_CHAIN_ADDRESS_CLAMP_TO_EDGE        = 2,
+   GLSLANG_FILTER_CHAIN_ADDRESS_CLAMP_TO_BORDER      = 3,
+   /* One entry per wrap mode a preset can name (rarch_wrap_to_address
+    * below), and no more: the Vulkan filter chain creates a sampler for
+    * every entry. A fifth, mirror-clamp-to-edge, stood here with no
+    * wrap mode mapping to it; its samplers were never bound, and
+    * creating them is invalid on a device without
+    * VK_KHR_sampler_mirror_clamp_to_edge - which is every device a
+    * core creates for itself through create_device. */
+   GLSLANG_FILTER_CHAIN_ADDRESS_COUNT
+} glslang_filter_chain_address;
+
+typedef enum glslang_filter_chain_scale
+{
+   GLSLANG_FILTER_CHAIN_SCALE_ORIGINAL,
+   GLSLANG_FILTER_CHAIN_SCALE_SOURCE,
+   GLSLANG_FILTER_CHAIN_SCALE_VIEWPORT,
+   GLSLANG_FILTER_CHAIN_SCALE_ABSOLUTE
+} glslang_filter_chain_scale;
+
+/* Single contiguous char buffer with '\0'-delimited
+ * lines stored back-to-back.  An offset table provides O(1) indexed access.
+ *
+ * Memory layout of data[]:
+ *   "line0\0line1\0line2\0"
+ *
+ * line_offsets[i] gives the byte position of the i-th line inside data[].
+ * Each line is individually null-terminated.
+ */
+struct shader_line_buf
+{
+   char    *data;          /* Contiguous buffer, lines separated by '\0' */
+   size_t   len;           /* Current used length (includes null terminators) */
+   size_t   cap;           /* Allocated capacity of data[]                   */
+   size_t  *line_offsets;  /* Byte offset of each line start within data[]   */
+   size_t   num_lines;     /* Number of lines stored                         */
+   size_t   lines_cap;     /* Allocated capacity for line_offsets[]           */
+   bool _single_alloc;
+};
+
+RETRO_BEGIN_DECLS
+
+
+static INLINE enum glslang_filter_chain_address rarch_wrap_to_address(
+      enum gfx_wrap_type type)
+{
+   switch (type)
+   {
+      case RARCH_WRAP_BORDER:
+         return GLSLANG_FILTER_CHAIN_ADDRESS_CLAMP_TO_BORDER;
+      case RARCH_WRAP_REPEAT:
+         return GLSLANG_FILTER_CHAIN_ADDRESS_REPEAT;
+      case RARCH_WRAP_MIRRORED_REPEAT:
+         return GLSLANG_FILTER_CHAIN_ADDRESS_MIRRORED_REPEAT;
+      case RARCH_WRAP_EDGE:
+      default:
+         break;
+   }
+
+   return GLSLANG_FILTER_CHAIN_ADDRESS_CLAMP_TO_EDGE;
+}
+
+const char *glslang_format_to_string(glslang_format fmt);
+
+enum glslang_format glslang_find_format(const char *fmt);
+
+/* Initialize a shader_line_buf to empty state. Returns false on alloc failure. */
+/* Include cache.
+ *
+ * Expanding a shader re-reads whatever its '#include' directives name,
+ * and shader packs share helper .inc files across passes, so expanding
+ * a whole preset reads the same handful of files many times over.  A
+ * cache handle lets one caller keep those reads for the span it cares
+ * about - a pass, a parameter-harvesting loop, a whole filter chain -
+ * instead of each root expansion starting cold.
+ *
+ * The handle is owned by the caller and is not internally synchronised:
+ * give each thread (or each chain creation) its own.  Passing NULL to
+ * the _cached entry point behaves exactly like
+ * glslang_read_shader_file(), i.e. a cache scoped to that one call. */
+void *glslang_include_cache_new(void);
+
+void glslang_include_cache_free(void *cache);
+
+/* Expand @path but keep only its '#pragma' lines, following '#include'
+ * as usual.  glslang_parse_meta() reads nothing else, so a caller after
+ * shader metadata gets the same lines in the same order without the
+ * flattened source around them - a 12-pass pack emits hundreds of lines
+ * this way rather than a hundred thousand.  Not for compilation. */
+bool glslang_read_shader_pragmas_cached(const char *path,
+      struct shader_line_buf *output, void *cache);
+
+struct glslang_last_pass
+{
+   unsigned index;
+   char name[64];
+   bool needs_target;
+   bool inspect_feedback;
+};
+
+/* Scale and format requirements are known before compilation. Reserve
+ * an optional final copy until compiled feedback usage is known, for a
+ * last pass with no scale as for one at the viewport. */
+void glslang_last_pass_init(const struct video_shader *shader,
+      void *cache, struct glslang_last_pass *state);
+
+/* As glslang_read_shader_file(), but reads through @cache. */
+bool glslang_read_shader_file_cached(const char *path,
+      struct shader_line_buf *output, bool root_file, bool is_optional,
+      void *cache);
+
+/* Assemble the source for one stage ("vertex" / "fragment") from the
+ * include-expanded line buffer: line 0 is the #version line, '#pragma
+ * stage' selects, '#pragma name' and '#pragma format' are dropped,
+ * every other line of the active stage is kept.  Returns a malloc'd
+ * NUL-terminated string the caller frees, NULL on allocation failure;
+ * an empty line buffer yields an empty string. */
+char *glslang_build_stage_source(const struct shader_line_buf *lines,
+      const char *stage);
+
+bool shader_line_buf_init(struct shader_line_buf *buf);
+
+/* Free all memory owned by a shader_line_buf. */
+void shader_line_buf_free(struct shader_line_buf *buf);
+
+/* Return pointer to the null-terminated line at the given index.
+ * Valid until the next append (which may realloc). */
+const char *shader_line_buf_get(const struct shader_line_buf *buf, size_t index);
+
+/* Reads a shader file and outputs its contents into a shader_line_buf.
+   Takes the path of the shader file and appends each line of the file
+   to the output buffer.
+   If the root_file argument is set to true, it expects the first line of the file
+   to be a valid '#version' string.
+   Handles '#include' statements by recursively parsing included files
+   and appending their contents.
+   Returns a bool indicating if parsing was successful.
+ */
+bool glslang_read_shader_file(const char *path,
+      struct shader_line_buf *output, bool root_file, bool is_optional);
+
+bool slang_texture_semantic_is_array(enum slang_texture_semantic sem);
+
+enum slang_texture_semantic slang_name_to_texture_semantic_array(
+      const char *name, const char **names,
+      unsigned *index);
+
+unsigned glslang_num_miplevels(unsigned width, unsigned height);
+
+RETRO_END_DECLS
+
+#endif

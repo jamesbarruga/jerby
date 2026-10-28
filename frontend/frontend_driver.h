@@ -1,0 +1,236 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __FRONTEND_DRIVER_H
+#define __FRONTEND_DRIVER_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#include <boolean.h>
+#include <retro_common_api.h>
+#include <lists/string_list.h>
+
+#include <libretro.h>
+#include "../gfx/video_defines.h"
+
+RETRO_BEGIN_DECLS
+
+enum frontend_powerstate
+{
+   FRONTEND_POWERSTATE_NONE = 0,
+   FRONTEND_POWERSTATE_NO_SOURCE,
+   FRONTEND_POWERSTATE_CHARGING,
+   FRONTEND_POWERSTATE_CHARGED,
+   FRONTEND_POWERSTATE_ON_POWER_SOURCE
+};
+
+enum frontend_fork
+{
+   FRONTEND_FORK_NONE = 0,
+   FRONTEND_FORK_CORE,
+   FRONTEND_FORK_CORE_WITH_ARGS,
+   FRONTEND_FORK_RESTART
+};
+
+enum frontend_architecture
+{
+   FRONTEND_ARCH_NONE = 0,
+   FRONTEND_ARCH_X86,
+   FRONTEND_ARCH_X86_64,
+   FRONTEND_ARCH_PPC,
+   FRONTEND_ARCH_ARM,
+   FRONTEND_ARCH_ARMV7,
+   FRONTEND_ARCH_ARMV8,
+   FRONTEND_ARCH_MIPS,
+   FRONTEND_ARCH_TILE
+};
+
+typedef void (*environment_get_t)(int *argc, char *argv[], void *args,
+   void *params_data);
+typedef void (*process_args_t)(int *argc, char *argv[]);
+
+typedef struct frontend_ctx_driver
+{
+   environment_get_t environment_get;
+   void (*init)(void *data);
+   void (*deinit)(void *data);
+   void (*exitspawn)(char *s, size_t len, char *args);
+
+   process_args_t process_args;
+   void (*exec)(const char *, bool);
+   bool (*set_fork)(enum frontend_fork fork_mode);
+   void (*shutdown)(bool);
+   void (*get_name)(char *, size_t);
+   size_t (*get_os)(char *, size_t, int *major, int *minor);
+   void (*content_loaded)(void);
+   enum frontend_architecture (*get_architecture)(void);
+   enum frontend_powerstate (*get_powerstate)(int *seconds, int *percent);
+   int  (*parse_drive_list)(void*, bool);
+   void (*install_signal_handler)(void);
+   int (*get_signal_handler_state)(void);
+   void (*set_signal_handler_state)(int value);
+   void (*destroy_signal_handler_state)(void);
+   void (*attach_console)(void);
+   void (*detach_console)(void);
+   void (*get_lakka_version)(char *, size_t);
+   /* TODO/FIXME: Need to implement some sort of startup brightness setting. */
+   void (*set_screen_brightness)(int);
+   void (*set_sustained_performance_mode)(bool on);
+   const char* (*get_cpu_model_name)(void);
+   enum retro_language (*get_user_language)(void);
+   bool (*is_narrator_running)(void);
+   bool (*accessibility_speak)(int speed,
+         const char* speak_text, int priority);
+   bool (*set_gamemode)(bool on);
+
+   enum rarch_display_type (*get_display_type)(void);
+
+   const char *ident;
+
+   const struct video_driver *(*get_video_driver)(void);
+   /* Whether the drive list offers the filesystem root; NULL means
+    * it does.  The file browser stops Parent Directory short of a
+    * root the drive list does not offer. */
+   bool (*root_in_drive_list)(void);
+   bool (*set_power_plan)(bool on, bool idle_disable);
+} frontend_ctx_driver_t;
+
+typedef struct
+{
+   frontend_ctx_driver_t *current_frontend_ctx; /* ptr alignment */
+   enum frontend_fork fork_mode; /* the last mode the driver accepted */
+} frontend_state_t;
+
+/**
+ * frontend_ctx_find_driver:
+ * @ident               : Identifier name of driver to find.
+ *
+ * Finds driver with @ident. Does not initialize.
+ *
+ * Returns: pointer to driver if successful, otherwise NULL.
+ **/
+frontend_ctx_driver_t *frontend_ctx_find_driver(const char *ident);
+
+frontend_ctx_driver_t *frontend_get_ptr(void);
+
+/**
+ * frontend_ctx_init_first:
+ *
+ * Finds first suitable driver and initialize.
+ *
+ * Returns: pointer to first suitable driver, otherwise NULL.
+ **/
+frontend_ctx_driver_t *frontend_ctx_init_first(void);
+
+int frontend_driver_parse_drive_list(void *data, bool load_content);
+
+bool frontend_driver_root_in_drive_list(void);
+
+void frontend_driver_content_loaded(void);
+
+bool frontend_driver_set_fork(enum frontend_fork fork_mode);
+
+void frontend_driver_process_args(int *argc, char *argv[]);
+
+bool frontend_driver_is_inited(void);
+
+void frontend_driver_init_first(void *args);
+
+void frontend_driver_free(void);
+
+enum frontend_architecture frontend_driver_get_cpu_architecture(void);
+
+const void *frontend_driver_get_cpu_architecture_str(char *s, size_t len);
+
+bool frontend_driver_has_get_video_driver_func(void);
+
+const struct video_driver *frontend_driver_get_video_driver(void);
+
+void frontend_driver_shutdown(bool a);
+
+void frontend_driver_deinit(void *args);
+
+void frontend_driver_exitspawn(char *s, size_t len, char *args);
+
+bool frontend_driver_has_fork(void);
+
+/* The fork the driver last accepted, FRONTEND_FORK_NONE when none:
+ * what exitspawn will launch on the way out. */
+enum frontend_fork frontend_driver_get_fork(void);
+
+size_t frontend_driver_get_core_extension(char *s, size_t len);
+
+bool frontend_driver_get_salamander_basename(char *s, size_t len);
+
+
+
+void frontend_driver_install_signal_handler(void);
+
+int frontend_driver_get_signal_handler_state(void);
+
+void frontend_driver_set_signal_handler_state(int value);
+
+void frontend_driver_destroy_signal_handler_state(void);
+
+void frontend_driver_attach_console(void);
+
+void frontend_driver_detach_console(void);
+
+void frontend_driver_set_screen_brightness(int value);
+
+bool frontend_driver_can_set_screen_brightness(void);
+
+
+
+
+void frontend_driver_set_sustained_performance_mode(bool on);
+
+const char* frontend_driver_get_cpu_model_name(void);
+
+enum retro_language frontend_driver_get_user_language(void);
+
+bool frontend_driver_has_gamemode(void);
+
+bool frontend_driver_set_gamemode(bool on);
+
+bool frontend_driver_set_power_plan(bool on, bool idle_disable);
+
+frontend_state_t *frontend_state_get_ptr(void);
+
+extern frontend_ctx_driver_t frontend_ctx_gx;
+extern frontend_ctx_driver_t frontend_ctx_wiiu;
+extern frontend_ctx_driver_t frontend_ctx_ps3;
+extern frontend_ctx_driver_t frontend_ctx_xdk;
+extern frontend_ctx_driver_t frontend_ctx_qnx;
+extern frontend_ctx_driver_t frontend_ctx_darwin;
+extern frontend_ctx_driver_t frontend_ctx_unix;
+extern frontend_ctx_driver_t frontend_ctx_psp;
+extern frontend_ctx_driver_t frontend_ctx_ps2;
+extern frontend_ctx_driver_t frontend_ctx_ctr;
+extern frontend_ctx_driver_t frontend_ctx_switch;
+extern frontend_ctx_driver_t frontend_ctx_win32;
+extern frontend_ctx_driver_t frontend_ctx_uwp;
+extern frontend_ctx_driver_t frontend_ctx_xenon;
+extern frontend_ctx_driver_t frontend_ctx_emscripten;
+extern frontend_ctx_driver_t frontend_ctx_dos;
+extern frontend_ctx_driver_t frontend_ctx_switch;
+extern frontend_ctx_driver_t frontend_ctx_orbis;
+
+
+RETRO_END_DECLS
+
+#endif

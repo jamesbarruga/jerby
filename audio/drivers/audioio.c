@@ -1,0 +1,311 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+
+#include <sys/audioio.h>
+
+#ifdef HAVE_CONFIG_H
+#include "../../config.h"
+#endif
+
+#include <compat/strl.h>
+#include <lists/string_list.h>
+
+#include <retro_miscellaneous.h>
+#include "../audio_driver.h"
+#include "../audio_device_label.h"
+#include "../../verbosity.h"
+
+#define DEFAULT_DEV "/dev/audio"
+
+static void *audioio_init(const char *device, unsigned rate, unsigned latency,
+       unsigned *new_out_rate)
+{
+   struct audio_info info;
+   char audiodev[PATH_MAX_LENGTH];
+   int              *fd  = (int*)calloc(1, sizeof(int));
+
+   if (!fd)
+      return NULL;
+
+   /* The device may be a list entry, "/dev/audio0 (name)": the path
+    * is what is opened. */
+   if (device)
+      audio_device_label_path(audiodev, sizeof(audiodev), device);
+   else
+      strlcpy(audiodev, DEFAULT_DEV, sizeof(audiodev));
+
+   AUDIO_INITINFO(&info);
+
+#ifdef AUMODE_PLAY_ALL
+   info.mode             = AUMODE_PLAY_ALL;
+#elif defined(AUMODE_PLAY)
+   info.mode             = AUMODE_PLAY;
+#endif
+   info.play.sample_rate = rate;
+   info.play.channels    = 2;
+   info.play.precision   = 16;
+#ifdef AUDIO_ENCODING_SLINEAR
+   info.play.encoding    = AUDIO_ENCODING_SLINEAR;
+#else
+   info.play.encoding    = AUDIO_ENCODING_LINEAR;
+#endif
+
+   if ((*fd = open(audiodev, O_WRONLY)) < 0)
+   {
+      free(fd);
+      perror("open");
+      return NULL;
+   }
+
+   if (ioctl(*fd, AUDIO_SETINFO, &info) < 0)
+      goto error;
+
+   if (ioctl(*fd, AUDIO_GETINFO, &info) < 0)
+      goto error;
+
+   *new_out_rate = info.play.sample_rate;
+
+   return fd;
+error:
+   close(*fd);
+   free(fd);
+   perror("ioctl");
+   return NULL;
+}
+
+static ssize_t audioio_write(void *data, const void *s, size_t len)
+{
+   ssize_t _len;
+   int *fd = (int*)data;
+
+   if (len == 0)
+      return 0;
+
+   if ((_len = write(*fd, s, len)) < 0)
+   {
+      if (errno == EAGAIN && (fcntl(*fd, F_GETFL) & O_NONBLOCK))
+         return 0;
+
+      return -1;
+   }
+
+   return _len;
+}
+
+static bool audioio_stop(void *data)
+{
+   struct audio_info info;
+   int *fd = (int*)data;
+
+#ifdef AUDIO_FLUSH
+   if (ioctl(*fd, AUDIO_FLUSH, NULL) < 0)
+      return false;
+#endif
+
+   if (ioctl(*fd, AUDIO_GETINFO, &info) < 0)
+      return false;
+
+   info.play.pause = true;
+
+   return ioctl(*fd, AUDIO_SETINFO, &info) == 0;
+}
+
+static bool audioio_start(void *data, bool is_shutdown)
+{
+   struct audio_info info;
+   int *fd = (int*)data;
+
+#ifdef AUDIO_FLUSH
+   if (ioctl(*fd, AUDIO_FLUSH, NULL) < 0)
+      return false;
+#endif
+
+   if (ioctl(*fd, AUDIO_GETINFO, &info) < 0)
+      return false;
+
+   info.play.pause = false;
+
+   return ioctl(*fd, AUDIO_SETINFO, &info) == 0;
+}
+
+static bool audioio_alive(void *data)
+{
+   struct audio_info info;
+   int *fd = (int*)data;
+
+   if (ioctl(*fd, AUDIO_GETINFO, &info) < 0)
+      return false;
+
+   return !info.play.pause;
+}
+
+static void audioio_set_nonblock_state(void *data, bool state)
+{
+   int rc;
+   int *fd = (int*)data;
+
+   if (state)
+      rc = fcntl(*fd, F_SETFL, fcntl(*fd, F_GETFL) | O_NONBLOCK);
+   else
+      rc = fcntl(*fd, F_SETFL, fcntl(*fd, F_GETFL) & (~O_NONBLOCK));
+   if (rc != 0)
+      RARCH_WARN("[AudioIO] Could not set nonblocking on audio file descriptor. Will not be able to fast-forward.\n");
+}
+
+static void audioio_free(void *data)
+{
+   int *fd = (int*)data;
+
+#ifdef AUDIO_FLUSH
+   (void)ioctl(*fd, AUDIO_FLUSH, NULL);
+#endif
+
+   close(*fd);
+   free(fd);
+}
+
+static size_t audioio_buffer_size(void *data)
+{
+   struct audio_info info;
+   int *fd = (int*)data;
+
+   if (ioctl(*fd, AUDIO_GETINFO, &info) < 0)
+      return 0;
+
+   return info.play.buffer_size;
+}
+
+#ifdef AUDIO_GETBUFINFO
+/* audio(4)'s play.seek is the count of bytes pending, so what the
+ * device will take is its buffer less what is still queued in it.
+ *
+ * AUDIO_GETBUFINFO is NetBSD's, and so is seek: the Solaris
+ * audio_prinfo carries buffer_size and samples and no seek, which is
+ * why this is not offered there. Reporting the whole buffer instead -
+ * which is what happened before - reads to rate control as a device
+ * that never drains, and it answers a device that is always empty
+ * with its full upward correction, for as long as it is on. The
+ * interface asks for nothing rather than a constant, and nothing is
+ * what the other branch gives. */
+static size_t audioio_write_avail(void *data)
+{
+   struct audio_info info;
+   int *fd = (int*)data;
+
+   if (ioctl(*fd, AUDIO_GETBUFINFO, &info) < 0)
+      return 0;
+   if (info.play.seek >= info.play.buffer_size)
+      return 0;
+   return info.play.buffer_size - info.play.seek;
+}
+#endif
+
+/* The device is opened with AUDIO_ENCODING_SLINEAR at 16 bits; the
+ * audio(4) encodings are integer PCM, mu-law and A-law, none float. */
+static bool audioio_use_float(void *data) { return false; }
+
+/* The nodes an audioio kernel offers: /dev/audio and /dev/audio0..15,
+ * as oss.c walks /dev/dsp*. AUDIO_GETDEV names the hardware behind a
+ * node on every audioio kernel, so the label carries it. A node that
+ * cannot be opened for output is not offered; a busy one is, since it
+ * exists and may be free later. Needs no driver instance, which is
+ * what the menu has when init failed and the user needs to pick
+ * another device. */
+static void *audioio_device_list_new(void *data)
+{
+   int i;
+   union string_list_elem_attr attr;
+   struct string_list *sl = string_list_new();
+
+   (void)data;
+   attr.i = 0;
+   if (!sl)
+      return NULL;
+
+   for (i = -1; i < 16; i++)
+   {
+      char path[32];
+      char label[160];
+      int fd;
+
+      if (i < 0)
+         strlcpy(path, DEFAULT_DEV, sizeof(path));
+      else
+         snprintf(path, sizeof(path), "/dev/audio%d", i);
+
+      fd = open(path, O_WRONLY | O_NONBLOCK);
+      if (fd < 0 && errno != EBUSY)
+         continue;
+
+      strlcpy(label, path, sizeof(label));
+      if (fd >= 0)
+      {
+         audio_device_t dev;
+         if (ioctl(fd, AUDIO_GETDEV, &dev) == 0 && dev.name[0])
+         {
+            size_t _len = strlcat(label, " (", sizeof(label));
+            _len       += strlcpy(label + _len, dev.name, sizeof(label) - _len);
+            strlcpy(label + _len, ")", sizeof(label) - _len);
+         }
+         close(fd);
+      }
+      string_list_append(sl, label, attr);
+   }
+
+   if (!sl->size)
+   {
+      string_list_free(sl);
+      return NULL;
+   }
+   return sl;
+}
+
+static void audioio_device_list_free(void *data, void *array_list_data)
+{
+   struct string_list *sl = (struct string_list*)array_list_data;
+   (void)data;
+   if (sl)
+      string_list_free(sl);
+}
+
+audio_driver_t audio_audioio = {
+   audioio_init,
+   audioio_write,
+   audioio_stop,
+   audioio_start,
+   audioio_alive,
+   audioio_set_nonblock_state,
+   audioio_free,
+   audioio_use_float,
+   "audioio",
+   audioio_device_list_new,
+   audioio_device_list_free,
+#ifdef AUDIO_GETBUFINFO
+   audioio_write_avail,
+#else
+   NULL, /* write_avail - no way to measure the fill here */
+#endif
+   audioio_buffer_size,
+   NULL /* write_raw */
+};
