@@ -21,11 +21,13 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.view.inputmethod.EditorInfo;
 import com.retroarch.browser.retroactivity.RetroActivityFuture;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.common.BitMatrix;
@@ -55,6 +57,7 @@ import java.util.UUID;
 /** A landscape game shelf: one tap plays, and a second open phone joins itself. */
 public final class JerbyActivity extends Activity {
     private static final int PICK_ROM = 7;
+    private static final int PICK_SITE_ROM = 8;
     private static final int DARK = Color.rgb(7, 25, 43);
     private static final int PANEL = Color.rgb(17, 47, 67);
     private static final int TEAL = Color.rgb(39, 213, 204);
@@ -72,6 +75,13 @@ public final class JerbyActivity extends Activity {
     private boolean sharing;
     private final List<JerbyStore.Game> storeGames = new ArrayList<>();
     private final List<File> storeInstalled = new ArrayList<>();
+    private final List<JerbyRomsGames.Game> siteGames = new ArrayList<>();
+    private String siteQuery = "";
+    private String siteError;
+    private int sitePage;
+    private int siteRequest;
+    private boolean siteLoading;
+    private boolean siteMore;
     private boolean hosting;
     private boolean launchedGame;
     private volatile boolean listening;
@@ -239,8 +249,9 @@ public final class JerbyActivity extends Activity {
         heading.setText(discover ? "Discover games" : "Pick a game");
         styleTabs();
         if (discover) {
-            say("Free games you can download and play in one tap.");
+            say("Pick a game. Online downloads need internet.");
             if (storeGames.isEmpty()) loadStore();
+            if (sitePage == 0 && !siteLoading) loadSiteGames(false);
         } else say("Tap to play. Another open phone on this Wi-Fi joins automatically.");
         refreshGames();
     }
@@ -350,26 +361,160 @@ public final class JerbyActivity extends Activity {
     private void renderStore() {
         if (storeGames.isEmpty()) {
             gamesView.addView(text(storeLoading ? "Loading games…" : "No games available yet.", 18, Color.WHITE));
-            return;
-        }
-        if (!gridView) {
+        } else if (!gridView) {
             for (int index = 0; index < storeGames.size(); index++)
                 gamesView.addView(storeCard(index, false));
-            return;
-        }
-        int columns = getResources().getConfiguration().screenWidthDp >= 700 ? 3 : 2;
-        for (int first = 0; first < storeGames.size(); first += columns) {
-            LinearLayout row = new LinearLayout(this);
-            gamesView.addView(row);
-            for (int column = 0; column < columns; column++) {
-                int index = first + column;
-                if (index < storeGames.size()) {
-                    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(225), 1);
-                    params.setMargins(dp(4), dp(4), dp(4), dp(6));
-                    row.addView(storeCard(index, true), params);
-                } else row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+        } else {
+            int columns = getResources().getConfiguration().screenWidthDp >= 700 ? 3 : 2;
+            for (int first = 0; first < storeGames.size(); first += columns) {
+                LinearLayout row = new LinearLayout(this);
+                gamesView.addView(row);
+                for (int column = 0; column < columns; column++) {
+                    int index = first + column;
+                    if (index < storeGames.size()) {
+                        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(225), 1);
+                        params.setMargins(dp(4), dp(4), dp(4), dp(6));
+                        row.addView(storeCard(index, true), params);
+                    } else row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+                }
             }
         }
+        renderSiteGames();
+    }
+
+    private void loadSiteGames(boolean append) {
+        int request = ++siteRequest;
+        int page = append ? sitePage + 1 : 1;
+        String query = siteQuery;
+        siteLoading = true;
+        siteError = null;
+        if (!append) { siteGames.clear(); sitePage = 0; siteMore = false; }
+        if (discoverTab) refreshGames();
+        new Thread(() -> {
+            try {
+                List<JerbyRomsGames.Game> found = JerbyRomsGames.load(this, query, page);
+                runOnUiThread(() -> {
+                    if (request != siteRequest) return;
+                    if (!append) siteGames.clear();
+                    siteGames.addAll(found);
+                    sitePage = page;
+                    siteMore = !found.isEmpty();
+                    siteLoading = false;
+                    if (discoverTab) refreshGames();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (request != siteRequest) return;
+                    siteLoading = false;
+                    siteError = error.getMessage();
+                    if (discoverTab) refreshGames();
+                });
+            }
+        }, "Jerby RomsGames catalog").start();
+    }
+
+    private void renderSiteGames() {
+        TextView heading = text("More SNES games · RomsGames", 21, Color.WHITE);
+        heading.setPadding(dp(4), dp(22), 0, dp(2));
+        gamesView.addView(heading);
+        gamesView.addView(text("Online source. Download games you are licensed to use.", 13,
+                Color.rgb(166, 219, 222)));
+        LinearLayout search = new LinearLayout(this);
+        search.setGravity(Gravity.CENTER_VERTICAL);
+        gamesView.addView(search);
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(siteQuery);
+        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(Color.rgb(166, 190, 205));
+        input.setHint("Search SNES games");
+        input.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        search.addView(input, new LinearLayout.LayoutParams(0, dp(48), 1));
+        Runnable runSearch = () -> {
+            String query = input.getText().toString().trim();
+            if (query.equals(siteQuery) && sitePage > 0) return;
+            siteQuery = query;
+            loadSiteGames(false);
+        };
+        input.setOnEditorActionListener((view, action, event) -> {
+            if (action != EditorInfo.IME_ACTION_SEARCH) return false;
+            runSearch.run();
+            return true;
+        });
+        search.addView(action("Search", runSearch), buttonLayout(96));
+        if (!siteQuery.isEmpty()) search.addView(action("Clear", () -> {
+            siteQuery = "";
+            loadSiteGames(false);
+        }), buttonLayout(75));
+
+        if (siteGames.isEmpty() && siteLoading) gamesView.addView(text("Loading online games…", 17, Color.WHITE));
+        else if (siteGames.isEmpty()) gamesView.addView(text(siteError == null
+                ? "No SNES games found." : "Online catalog unavailable: " + siteError, 16, Color.WHITE));
+        if (!gridView) {
+            for (JerbyRomsGames.Game game : siteGames) gamesView.addView(siteCard(game, false));
+        } else {
+            int columns = getResources().getConfiguration().screenWidthDp >= 700 ? 3 : 2;
+            for (int first = 0; first < siteGames.size(); first += columns) {
+                LinearLayout row = new LinearLayout(this);
+                gamesView.addView(row);
+                for (int column = 0; column < columns; column++) {
+                    int index = first + column;
+                    if (index < siteGames.size()) {
+                        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(190), 1);
+                        params.setMargins(dp(4), dp(4), dp(4), dp(6));
+                        row.addView(siteCard(siteGames.get(index), true), params);
+                    } else row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+                }
+            }
+        }
+        if (siteLoading && !siteGames.isEmpty()) gamesView.addView(text("Loading more…", 16, Color.WHITE));
+        else if (siteError != null && !siteGames.isEmpty())
+            gamesView.addView(action("Retry loading games", () -> loadSiteGames(true)));
+        else if (siteMore) gamesView.addView(action("More games  ↓", () -> loadSiteGames(true)));
+    }
+
+    private View siteCard(JerbyRomsGames.Game game, boolean grid) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(grid ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        card.setBackground(panel(PANEL, 18, Color.rgb(54, 110, 128)));
+        if (!grid) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(108));
+            params.setMargins(dp(4), dp(4), dp(4), dp(6));
+            card.setLayoutParams(params);
+        }
+        card.setOnClickListener(view -> {
+            Intent download = new Intent(this, JerbyRomsGamesDownloadActivity.class);
+            download.putExtra(JerbyRomsGamesDownloadActivity.GAME_URL, game.pageUrl);
+            download.putExtra(JerbyRomsGamesDownloadActivity.GAME_TITLE, game.title);
+            startActivityForResult(download, PICK_SITE_ROM);
+        });
+        FrameLayout cover = new FrameLayout(this);
+        GradientDrawable background = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[] { Color.rgb(43, 85, 127), Color.rgb(91, 52, 119) });
+        background.setCornerRadius(dp(10));
+        cover.setBackground(background);
+        cover.setClipToOutline(true);
+        TextView placeholder = text("✦  SNES", 20, Color.rgb(255, 227, 122));
+        placeholder.setGravity(Gravity.CENTER);
+        cover.addView(placeholder, new FrameLayout.LayoutParams(-1, -1));
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        cover.addView(image, new FrameLayout.LayoutParams(-1, -1));
+        JerbyCoverLoader.load(this, image, game.coverUrl);
+        card.addView(cover, new LinearLayout.LayoutParams(grid ? -1 : dp(130), grid ? dp(118) : dp(88)));
+        LinearLayout description = new LinearLayout(this);
+        description.setOrientation(LinearLayout.VERTICAL);
+        description.setGravity(Gravity.CENTER_VERTICAL);
+        description.setPadding(grid ? 0 : dp(12), 0, 0, 0);
+        TextView title = text(game.title, 17, Color.WHITE);
+        title.setMaxLines(grid ? 2 : 1);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        description.addView(title);
+        description.addView(text("↓  Download & Play", 13, TEAL));
+        card.addView(description, new LinearLayout.LayoutParams(grid ? -1 : 0, grid ? dp(58) : -1, grid ? 0 : 1));
+        return card;
     }
 
     private View storeCard(int index, boolean grid) {
@@ -702,6 +847,20 @@ public final class JerbyActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == PICK_SITE_ROM) {
+            if (result == RESULT_OK && data != null) {
+                String path = data.getStringExtra(JerbyRomsGamesDownloadActivity.ROM_PATH);
+                if (path != null) try {
+                    File game = new File(path);
+                    String directory = JerbyStorage.romDir(this).getCanonicalPath() + File.separator;
+                    if (game.isFile() && game.getCanonicalPath().startsWith(directory)) {
+                        showTab(false);
+                        play(game);
+                    }
+                } catch (IOException error) { say("Could not open game: " + error.getMessage()); }
+            }
+            return;
+        }
         if (request != PICK_ROM || result != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         String name = uri.getLastPathSegment();

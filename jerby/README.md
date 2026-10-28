@@ -27,6 +27,15 @@ SNES ROMs from ZIPs automatically. The catalog is read from this repository's
 `main` branch, with an included offline copy as fallback. Additional catalog
 games require a redistributable ROM, creator permission, and checksum entries.
 
+Discover also loads SNES titles and search results from RomsGames.net as a
+separate online source. Selecting a title opens that site's download form in
+Jerby! and starts its Save Game action. The site may show a CAPTCHA that the
+player must complete. When the site sends a file, Jerby! imports a SNES ROM or
+ZIP automatically and starts it. Jerby! does not host these third-party games,
+and the online source requires an internet connection. The site's terms require
+downloaders to hold a license for each ROM. This integration depends on the
+site's page and download flow and needs testing on Android phones.
+
 **Share Jerby!** offers a QR code and local web page that serves the APK from
 the installed phone. The other phone can use the same Wi-Fi or connect to the
 first phone's hotspot; internet access is not needed. Android's share sheet
@@ -47,8 +56,8 @@ file, and ZIPs are extracted automatically. Use files you have the right to use.
 ## Source and licenses
 
 The Android emulator and netplay code derives from RetroArch, licensed GPLv3.
-The SNES core is bsnes-mercury Performance, licensed GPLv3. The two included
-games are original Jerby! games under MIT. Their SNES toolkit and sprite asset
+The SNES core is bsnes-mercury Performance, licensed GPLv3. The four Jerby!
+games are original and under MIT. Their SNES toolkit and sprite asset
 come from OpenSNES under MIT; the notice is in `OPENSNES_LICENSE.txt`.
 QR generation uses ZXing Core under Apache 2.0.
 
