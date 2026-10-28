@@ -6,7 +6,11 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
@@ -24,198 +28,390 @@ import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.Inet4Address;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.NetworkInterface;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLConnection;
-import java.util.Enumeration;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
+/** A landscape game shelf: one tap plays, and a second open phone joins itself. */
 public final class JerbyActivity extends Activity {
     private static final int PICK_ROM = 7;
-    private final int teal = Color.rgb(0, 151, 160);
-    private final int dark = Color.rgb(7, 33, 49);
-    private File selected;
-    private LinearLayout gameList;
+    private static final int DARK = Color.rgb(7, 25, 43);
+    private static final int PANEL = Color.rgb(17, 47, 67);
+    private static final int TEAL = Color.rgb(39, 213, 204);
+    private LinearLayout gamesView;
     private TextView status;
+    private Button viewButton;
+    private Button muteButton;
+    private boolean gridView;
+    private boolean hosting;
+    private boolean launchedGame;
+    private volatile boolean listening;
+    private volatile boolean joining;
+    private volatile String ignoredSession;
+    private volatile long lastAttemptAt;
+    private DatagramSocket discoverySocket;
+    private Thread discoveryThread;
+    private NsdManager nsdManager;
+    private NsdManager.DiscoveryListener nsdDiscovery;
+    private WifiManager.MulticastLock multicastLock;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(dark);
-        getWindow().setNavigationBarColor(dark);
-        try { JerbyStorage.installBundled(this); }
-        catch (IOException e) { new AlertDialog.Builder(this).setMessage("Cannot install bundled game: " + e.getMessage()).setPositiveButton("OK", null).show(); }
-        buildUi();
+        getWindow().setStatusBarColor(DARK);
+        getWindow().setNavigationBarColor(DARK);
+        gridView = getSharedPreferences("jerby-ui", MODE_PRIVATE).getBoolean("grid", true);
+        try {
+            JerbyStorage.installBundled(this);
+            JerbyControls.prepare(this);
+        } catch (IOException e) {
+            new AlertDialog.Builder(this).setMessage("Could not prepare games: " + e.getMessage())
+                    .setPositiveButton("OK", null).show();
+        }
+        buildCatalog();
         refreshGames();
     }
 
-    private void buildUi() {
+    @Override protected void onResume() {
+        super.onResume();
+        if (hosting && launchedGame) {
+            stopService(new Intent(this, JerbyTransferService.class));
+            hosting = false;
+            launchedGame = false;
+        }
+        startDiscovery();
+    }
+
+    @Override protected void onPause() {
+        stopDiscovery();
+        super.onPause();
+    }
+
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+
+    private GradientDrawable panel(int color, int radius, int stroke) {
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(color);
+        shape.setCornerRadius(dp(radius));
+        if (stroke != 0) shape.setStroke(dp(1), stroke);
+        return shape;
+    }
+
+    private TextView text(String value, int size, int color) {
+        TextView text = new TextView(this);
+        text.setText(value);
+        text.setTextSize(size);
+        text.setTextColor(color);
+        text.setGravity(Gravity.CENTER_VERTICAL);
+        return text;
+    }
+
+    private Button action(String label, Runnable action) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextColor(Color.WHITE);
+        button.setBackground(panel(PANEL, 18, Color.rgb(50, 103, 121)));
+        button.setOnClickListener(view -> action.run());
+        return button;
+    }
+
+    private void buildCatalog() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(Color.rgb(245, 251, 251));
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(24, 18, 24, 24);
-        scroll.addView(root);
+        scroll.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[] { DARK, Color.rgb(12, 51, 68) }));
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(8), dp(18), dp(18));
+        scroll.addView(page);
         setContentView(scroll);
 
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        page.addView(header, new LinearLayout.LayoutParams(-1, dp(72)));
+        boolean compact = getResources().getConfiguration().screenWidthDp < 700;
         ImageView logo = new ImageView(this);
         try (InputStream in = getAssets().open("jerby-wordmark.png")) {
             logo.setImageBitmap(BitmapFactory.decodeStream(in));
         } catch (IOException ignored) { }
-        logo.setAdjustViewBounds(true);
-        root.addView(logo, new LinearLayout.LayoutParams(-1, 150));
+        logo.setScaleType(ImageView.ScaleType.FIT_START);
+        header.addView(logo, new LinearLayout.LayoutParams(dp(compact ? 125 : 185), dp(68)));
+        View spacer = new View(this);
+        header.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
 
-        TextView subtitle = label("SNES games together, on the same Wi-Fi", 17, dark);
-        subtitle.setGravity(Gravity.CENTER);
-        root.addView(subtitle);
-        status = label("Choose a game below.", 14, Color.DKGRAY);
-        status.setPadding(0, 12, 0, 16);
-        root.addView(status);
+        viewButton = action(gridView ? "☷  List" : "▦  Grid", () -> {
+            gridView = !gridView;
+            getSharedPreferences("jerby-ui", MODE_PRIVATE).edit().putBoolean("grid", gridView).apply();
+            viewButton.setText(gridView ? "☷  List" : "▦  Grid");
+            refreshGames();
+        });
+        header.addView(viewButton, buttonLayout(compact ? 78 : 100));
+        muteButton = action("", () -> {
+            JerbyControls.setMuted(this, !JerbyControls.muted(this));
+            muteButton.setText(JerbyControls.muted(this) ? "🔇 Muted" : "🔊 Sound");
+        });
+        muteButton.setText(JerbyControls.muted(this) ? "🔇 Muted" : "🔊 Sound");
+        header.addView(muteButton, buttonLayout(compact ? 90 : 108));
+        header.addView(action("Controls", () -> startActivity(new Intent(this, JerbyControlsActivity.class))), buttonLayout(compact ? 90 : 105));
+        header.addView(action("+  Add game", this::addGame), buttonLayout(compact ? 98 : 116));
 
-        root.addView(label("Your games", 22, dark));
-        gameList = new LinearLayout(this);
-        gameList.setOrientation(LinearLayout.VERTICAL);
-        root.addView(gameList);
-
-        root.addView(button("Play solo", () -> launch(selected, null, null)));
-        root.addView(button("Host LAN game", this::host));
-        root.addView(button("Join LAN game", this::joinDialog));
-        root.addView(button("Stop hosting", () -> {
-            stopService(new Intent(this, JerbyTransferService.class));
-            say("LAN hosting stopped.");
-        }));
-        root.addView(label("Add more games", 22, dark));
-        root.addView(button("Import ROM from phone", this::pickRom));
-        root.addView(button("Download ROM from link", this::downloadDialog));
-        TextView note = label("Use SNES game files you have the right to use. Jerby! shares a missing game directly between your two phones on the local network.", 13, Color.DKGRAY);
-        note.setPadding(0, 18, 0, 0);
-        root.addView(note);
+        TextView heading = text("Pick a game", 25, Color.WHITE);
+        heading.setTypeface(null, android.graphics.Typeface.BOLD);
+        page.addView(heading);
+        status = text("Tap to play. Another open phone on this Wi-Fi joins automatically.", 14,
+                Color.rgb(166, 219, 222));
+        status.setPadding(0, dp(2), 0, dp(10));
+        page.addView(status);
+        gamesView = new LinearLayout(this);
+        gamesView.setOrientation(LinearLayout.VERTICAL);
+        page.addView(gamesView);
     }
 
-    private TextView label(String text, int size, int color) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextSize(size);
-        view.setTextColor(color);
-        view.setPadding(0, 8, 0, 8);
-        return view;
+    private LinearLayout.LayoutParams buttonLayout(int width) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(width), dp(46));
+        params.leftMargin = dp(7);
+        return params;
     }
 
-    private Button button(String text, Runnable action) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setAllCaps(false);
-        button.setOnClickListener(v -> action.run());
-        return button;
+    private String title(File game) {
+        String name = game.getName().replaceFirst("^[0-9a-f]{8}-", "")
+                .replaceFirst("(?i)\\.(sfc|smc|fig|swc|zip)$", "")
+                .replace('_', ' ').replace('-', ' ').trim();
+        if (name.equalsIgnoreCase("jerby dash")) return "Jerby Dash";
+        if (name.equalsIgnoreCase("jerby tag")) return "Jerby Tag";
+        return name;
     }
 
     private void refreshGames() {
-        gameList.removeAllViews();
+        gamesView.removeAllViews();
         File[] games = JerbyStorage.games(this);
-        if (selected == null || !selected.exists()) selected = games.length == 0 ? null : games[0];
-        for (File game : games) {
-            Button item = button(game.getName().replaceFirst("^[0-9a-f]{8}-", ""), () -> {
-                selected = game;
-                refreshGames();
-                say("Selected " + game.getName());
-            });
-            if (game.equals(selected)) item.setText("✓  " + item.getText());
-            item.setTextColor(game.equals(selected) ? teal : dark);
-            gameList.addView(item);
+        if (games.length == 0) { gamesView.addView(text("Add a SNES game to begin.", 18, Color.WHITE)); return; }
+        if (!gridView) {
+            for (File game : games) gamesView.addView(gameCard(game, false));
+            return;
+        }
+        int columns = getResources().getConfiguration().screenWidthDp >= 700 ? 3 : 2;
+        for (int first = 0; first < games.length; first += columns) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            gamesView.addView(row);
+            for (int column = 0; column < columns; column++) {
+                int position = first + column;
+                if (position < games.length) {
+                    LinearLayout.LayoutParams positionParams = new LinearLayout.LayoutParams(0, dp(192), 1);
+                    positionParams.setMargins(dp(4), dp(4), dp(4), dp(6));
+                    row.addView(gameCard(games[position], true), positionParams);
+                } else row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+            }
         }
     }
 
-    private void say(String message) { status.setText(message); }
+    private View gameCard(File game, boolean grid) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(grid ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        card.setBackground(panel(PANEL, 18, Color.rgb(54, 110, 128)));
+        card.setOnClickListener(v -> play(game));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(-1, grid ? dp(182) : dp(102));
+        cardParams.setMargins(dp(4), dp(4), dp(4), dp(6));
+        card.setLayoutParams(cardParams);
 
-    private void launch(File game, String mode, String hostIp) {
-        if (game == null || !game.isFile()) { say("Choose a game first."); return; }
+        String asset = game.getName().equals("jerby_dash.sfc") ? "jerby-dash-cover.png"
+                : game.getName().equals("jerby_tag.sfc") ? "jerby-tag-cover.png" : null;
+        if (asset != null) {
+            ImageView cover = new ImageView(this);
+            try (InputStream in = getAssets().open(asset)) { cover.setImageBitmap(BitmapFactory.decodeStream(in)); }
+            catch (IOException ignored) { }
+            cover.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            cover.setBackground(panel(Color.rgb(9, 31, 51), 10, 0));
+            card.addView(cover, new LinearLayout.LayoutParams(grid ? -1 : dp(125), grid ? dp(130) : dp(82)));
+        } else {
+            TextView cover = text("✦  SNES\n" + title(game), 18, Color.rgb(255, 227, 122));
+            cover.setGravity(Gravity.CENTER);
+            cover.setMaxLines(3);
+            cover.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            GradientDrawable coverBackground = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                    new int[] { Color.rgb(43, 85, 127), Color.rgb(91, 52, 119) });
+            coverBackground.setCornerRadius(dp(10));
+            cover.setBackground(coverBackground);
+            card.addView(cover, new LinearLayout.LayoutParams(grid ? -1 : dp(125), grid ? dp(130) : dp(82)));
+        }
+        LinearLayout description = new LinearLayout(this);
+        description.setOrientation(LinearLayout.VERTICAL);
+        description.setGravity(Gravity.CENTER_VERTICAL);
+        description.setPadding(grid ? 0 : dp(14), 0, 0, 0);
+        TextView title = text(title(game), 18, Color.WHITE);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        description.addView(title);
+        if (!grid) description.addView(text("Tap to play", 13, TEAL));
+        card.addView(description, new LinearLayout.LayoutParams(grid ? -1 : 0, grid ? dp(38) : -1, grid ? 0 : 1));
+        return card;
+    }
+
+    private void say(String message) { if (status != null) status.setText(message); }
+
+    private boolean launch(File game, String mode, String hostIp) {
+        if (game == null || !game.isFile()) { say("Game file is missing."); return false; }
+        File config;
+        try { config = JerbyControls.prepare(this); }
+        catch (IOException e) { say("Controls could not load: " + e.getMessage()); return false; }
         Intent play = new Intent(this, RetroActivityFuture.class);
         play.putExtra("ROM", game.getAbsolutePath());
         play.putExtra("LIBRETRO", JerbyStorage.coreFile(this).getAbsolutePath());
-        // The ROM and core live in app-private storage, so RetroArch does not
-        // need its legacy all-files permission prompt.
-        play.putExtra("CONFIGFILE", "");
+        play.putExtra("CONFIGFILE", config.getAbsolutePath());
         if (mode != null) play.putExtra("JERBY_NETPLAY_MODE", mode);
         if (hostIp != null) play.putExtra("JERBY_NETPLAY_HOST", hostIp);
         startActivity(play);
+        return true;
     }
 
-    private void host() {
-        if (selected == null || !selected.isFile()) { say("Choose a game first."); return; }
+    private void play(File game) {
         Intent service = new Intent(this, JerbyTransferService.class);
-        service.putExtra("game", selected.getAbsolutePath());
+        service.putExtra("game", game.getAbsolutePath());
+        String session = UUID.randomUUID().toString();
+        service.putExtra("session", session);
+        ignoredSession = session;
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
-        String ip = localWifiIp();
-        new AlertDialog.Builder(this).setTitle("Host a LAN game")
-                .setMessage("On your son's phone, tap Join LAN game and enter:\n" + ip +
-                        "\n\nJerby! will copy this game to his phone if it is missing. Both phones need the same Wi-Fi network.")
-                .setPositiveButton("Start playing", (d, which) -> launch(selected, "host", null))
-                .setNegativeButton("Cancel", (d, which) -> stopService(new Intent(this, JerbyTransferService.class)))
-                .show();
+        hosting = true;
+        launchedGame = true;
+        if (!launch(game, "host", null)) {
+            hosting = false;
+            launchedGame = false;
+            stopService(service);
+        }
     }
 
-    private void joinDialog() {
-        EditText input = new EditText(this);
-        input.setSingleLine(true);
-        input.setHint("192.168.1.42");
-        input.setInputType(android.text.InputType.TYPE_CLASS_PHONE);
-        new AlertDialog.Builder(this).setTitle("Join LAN game")
-                .setMessage("Enter the IP address shown on the host phone.")
-                .setView(input)
-                .setPositiveButton("Join", (d, which) -> join(input.getText().toString().trim()))
-                .setNegativeButton("Cancel", null).show();
-    }
-
-    private void join(String ip) {
-        if (!ip.matches("(\\d{1,3}\\.){3}\\d{1,3}")) { say("Enter a local IPv4 address."); return; }
-        say("Checking the host's game…");
-        new Thread(() -> {
-            try (Socket socket = new Socket()) {
-                socket.connect(new InetSocketAddress(ip, JerbyTransferService.PORT), 7000);
-                socket.setSoTimeout(60000);
-                DataInputStream in = new DataInputStream(socket.getInputStream());
-                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-                if (!"JERBY1".equals(in.readUTF())) throw new IOException("This is not a Jerby! host");
-                String name = JerbyStorage.safeName(in.readUTF());
-                long length = in.readLong();
-                String hash = in.readUTF();
-                if (length < 1 || length > JerbyStorage.MAX_ROM_BYTES) throw new IOException("Invalid game size");
-                File game = JerbyStorage.findByHash(this, hash);
-                boolean missing = game == null;
-                out.writeBoolean(missing);
-                out.flush();
-                if (missing) {
-                    runOnUiThread(() -> say("Copying " + name + " over Wi-Fi…"));
-                    game = JerbyStorage.receive(this, in, name, length, hash);
+    private void startDiscovery() {
+        if (discoveryThread != null) return;
+        listening = true;
+        startNsd();
+        discoveryThread = new Thread(() -> {
+            try (DatagramSocket socket = new DatagramSocket(null)) {
+                socket.setReuseAddress(true);
+                socket.bind(new InetSocketAddress(JerbyTransferService.DISCOVERY_PORT));
+                socket.setSoTimeout(2000);
+                discoverySocket = socket;
+                byte[] buffer = new byte[128];
+                while (listening) {
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    try { socket.receive(packet); }
+                    catch (SocketTimeoutException ignored) { continue; }
+                    String message = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+                    if (!message.matches("JERBY2\\|[0-9a-fA-F-]{36}")) continue;
+                    String session = message.substring(7);
+                    attemptJoin(packet.getAddress().getHostAddress(), session);
                 }
-                File ready = game;
-                runOnUiThread(() -> { selected = ready; refreshGames(); launch(ready, "client", ip); });
-            } catch (Exception e) {
-                runOnUiThread(() -> say("Could not join: " + e.getMessage()));
+            } catch (IOException ignored) { }
+            finally {
+                if (discoverySocket != null && discoverySocket.isClosed()) discoverySocket = null;
+                if (discoveryThread == Thread.currentThread()) discoveryThread = null;
             }
-        }, "Jerby join").start();
+        }, "Jerby LAN discovery");
+        discoveryThread.start();
     }
 
-    private String localWifiIp() {
+    private void stopDiscovery() {
+        listening = false;
+        DatagramSocket socket = discoverySocket;
+        if (socket != null) socket.close();
+        discoverySocket = null;
+        discoveryThread = null;
+        if (nsdManager != null && nsdDiscovery != null)
+            try { nsdManager.stopServiceDiscovery(nsdDiscovery); }
+            catch (Exception ignored) { }
+        nsdDiscovery = null;
+        if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
+    }
+
+    private void startNsd() {
         try {
-            String fallback = null;
-            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-            while (interfaces.hasMoreElements()) {
-                NetworkInterface network = interfaces.nextElement();
-                if (!network.isUp() || network.isLoopback()) continue;
-                Enumeration<InetAddress> addresses = network.getInetAddresses();
-                while (addresses.hasMoreElements()) {
-                    InetAddress address = addresses.nextElement();
-                    if (!(address instanceof Inet4Address) || address.isLoopbackAddress()) continue;
-                    if (network.getName().startsWith("wlan") || network.getName().startsWith("wifi")) return address.getHostAddress();
-                    if (fallback == null && address.isSiteLocalAddress()) fallback = address.getHostAddress();
-                }
+            WifiManager wifi = (WifiManager)getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wifi != null) {
+                multicastLock = wifi.createMulticastLock("jerby-discovery");
+                multicastLock.setReferenceCounted(false);
+                multicastLock.acquire();
             }
-            return fallback == null ? "(check Wi-Fi settings)" : fallback;
-        } catch (Exception e) { return "(check Wi-Fi settings)"; }
+            nsdManager = (NsdManager)getSystemService(NSD_SERVICE);
+            if (nsdManager == null) return;
+            nsdDiscovery = new NsdManager.DiscoveryListener() {
+                @Override public void onDiscoveryStarted(String type) { }
+                @Override public void onDiscoveryStopped(String type) { }
+                @Override public void onStartDiscoveryFailed(String type, int error) { }
+                @Override public void onStopDiscoveryFailed(String type, int error) { }
+                @Override public void onServiceLost(NsdServiceInfo service) { }
+                @Override public void onServiceFound(NsdServiceInfo service) {
+                    String name = service.getServiceName();
+                    if (!listening || name == null || !name.startsWith("Jerby-")) return;
+                    String session = name.substring(6);
+                    if (!session.matches("[0-9a-fA-F-]{36}")) return;
+                    try {
+                        nsdManager.resolveService(service, new NsdManager.ResolveListener() {
+                            @Override public void onResolveFailed(NsdServiceInfo info, int error) { }
+                            @Override public void onServiceResolved(NsdServiceInfo info) {
+                                if (info.getPort() == JerbyTransferService.PORT && info.getHost() instanceof Inet4Address)
+                                    attemptJoin(info.getHost().getHostAddress(), session);
+                            }
+                        });
+                    } catch (Exception ignored) { }
+                }
+            };
+            nsdManager.discoverServices("_jerby._tcp.", NsdManager.PROTOCOL_DNS_SD, nsdDiscovery);
+        } catch (Exception ignored) { }
+    }
+
+    private synchronized void attemptJoin(String ip, String session) {
+        if (!listening || joining || session.equals(ignoredSession)
+                || System.currentTimeMillis() - lastAttemptAt < 5000) return;
+        joining = true;
+        lastAttemptAt = System.currentTimeMillis();
+        new Thread(() -> join(ip, session), "Jerby auto join").start();
+    }
+
+    private void join(String ip, String session) {
+        runOnUiThread(() -> say("Joining a game on your Wi-Fi…"));
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(ip, JerbyTransferService.PORT), 7000);
+            socket.setSoTimeout(60000);
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            if (!"JERBY1".equals(in.readUTF())) throw new IOException("Not a Jerby! game");
+            String name = JerbyStorage.safeName(in.readUTF());
+            long length = in.readLong();
+            String hash = in.readUTF();
+            if (length < 1 || length > JerbyStorage.MAX_ROM_BYTES) throw new IOException("Invalid game size");
+            File game = JerbyStorage.findByHash(this, hash);
+            out.writeBoolean(game == null);
+            out.flush();
+            if (game == null) {
+                runOnUiThread(() -> say("Copying " + name + " over Wi-Fi…"));
+                game = JerbyStorage.receive(this, in, name, length, hash);
+            }
+            File ready = game;
+            runOnUiThread(() -> {
+                if (!listening) return;
+                ignoredSession = session;
+                refreshGames();
+                say("Starting " + title(ready) + "…");
+                launch(ready, "client", ip);
+            });
+        } catch (Exception e) {
+            runOnUiThread(() -> say("Could not join yet. Waiting for the host…"));
+        } finally { joining = false; }
+    }
+
+    private void addGame() {
+        new AlertDialog.Builder(this).setTitle("Add a SNES game")
+                .setItems(new String[] { "Import from this phone", "Download from a link" },
+                        (dialog, which) -> { if (which == 0) pickRom(); else downloadDialog(); }).show();
     }
 
     private void pickRom() {
@@ -242,7 +438,7 @@ public final class JerbyActivity extends Activity {
             try (InputStream in = getContentResolver().openInputStream(uri)) {
                 if (in == null) throw new IOException("Cannot open game file");
                 File game = JerbyStorage.importRom(this, in, filename);
-                runOnUiThread(() -> { selected = game; refreshGames(); say("Imported " + game.getName()); });
+                runOnUiThread(() -> { refreshGames(); say("Added " + title(game)); });
             } catch (Exception e) { runOnUiThread(() -> say("Import failed: " + e.getMessage())); }
         }, "Jerby import").start();
     }
@@ -255,7 +451,7 @@ public final class JerbyActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Download a SNES game")
                 .setMessage("Paste a direct HTTPS link to a game ROM you may use.")
                 .setView(input)
-                .setPositiveButton("Download", (d, which) -> download(input.getText().toString().trim()))
+                .setPositiveButton("Download", (dialog, which) -> download(input.getText().toString().trim()))
                 .setNegativeButton("Cancel", null).show();
     }
 
@@ -272,7 +468,7 @@ public final class JerbyActivity extends Activity {
                 connection.setReadTimeout(30000);
                 try (InputStream in = connection.getInputStream()) {
                     File game = JerbyStorage.importRom(this, in, name);
-                    runOnUiThread(() -> { selected = game; refreshGames(); say("Downloaded " + game.getName()); });
+                    runOnUiThread(() -> { refreshGames(); say("Added " + title(game)); });
                 }
             } catch (Exception e) { runOnUiThread(() -> say("Download failed: " + e.getMessage())); }
         }, "Jerby download").start();

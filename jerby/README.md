@@ -2,23 +2,29 @@
 
 Jerby! is a free Android SNES app for two phones on the same Wi-Fi. It is a
 modified build of [RetroArch](https://github.com/libretro/RetroArch) with a
-simple launcher, LAN game transfer, a bundled
+landscape game catalog, automatic LAN discovery and game transfer, a bundled
 [bsnes-mercury Performance](https://github.com/libretro/bsnes-mercury) core,
 and two original games: Jerby Dash and Jerby Tag.
 
 ## Play
 
 1. Install the same Jerby! APK on both Android phones (64-bit ARM).
-2. Open Jerby! and select a game. The two Jerby games are installed with the app.
-3. On one phone, tap **Host LAN game**. Note the Wi-Fi IP shown.
-4. On the other, tap **Join LAN game** and enter that IP. Jerby! checks the
-   game's SHA-256. If the joining phone lacks it, the host copies it directly
-   over Wi-Fi and the client verifies it before starting.
-5. The host is Player 1 and the joining phone is Player 2. Both see the same
-   SNES screen, just as two controllers on one console would.
+2. Open Jerby! on both phones on the same Wi-Fi. The two Jerby games are installed
+   with the app. The catalog can switch between grid and list view.
+3. Tap a game on the first phone. It plays immediately and quietly hosts a LAN
+   session. The other open phone discovers the session and joins automatically.
+4. If the joining phone lacks the game, Jerby! transfers it over Wi-Fi and
+   checks its SHA-256 before playing. The host is Player 1 and the joining
+   phone is Player 2.
 
-You can add SNES ROMs through **Import ROM from phone** or **Download ROM from
-link**. The download accepts a direct HTTPS link to an `.sfc`, `.smc`, `.fig`,
+The catalog has a mute toggle and **Controls**. The control editor lets you drag
+the D-pad, face buttons, shoulder buttons, Start, and Select to comfortable
+positions. Changes are used when the next game starts. The game view stays in
+landscape and shows the game and touch controls. Android Back returns to the
+catalog.
+
+You can add SNES ROMs through the catalog's **Add game** button. The download
+accepts a direct HTTPS link to an `.sfc`, `.smc`, `.fig`,
 `.swc`, or `.zip` file. Use files you have the right to use.
 
 ## Source and licenses
@@ -56,5 +62,6 @@ The games' source is in `jerby/games/`. Build them with
 `aa8b441504172078ba136a94c20a41dd1c156b4c` and copy their `.sfc`
 outputs to `pkg/android/phoenix/assets/`.
 
-This release has been compiled locally. A real-device, two-phone LAN test is
-still needed before treating it as a stable release.
+The previous manual LAN flow was played successfully on two real phones. This
+new automatic discovery and control editor have been compiled locally but still
+need a real-device test before a stable release.
